@@ -1,4 +1,4 @@
-add_library(api STATIC)
+add_library(core STATIC)
 
 target_sources(core
     PRIVATE
@@ -14,3 +14,9 @@ target_include_directories(core
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+target_link_libraries(core
+    PRIVATE
+    api
+)
+

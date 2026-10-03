@@ -30,6 +30,8 @@
 
               boost
               nlohmann_json
+              cpr
+              curl
 
               openssl
               pkg-config

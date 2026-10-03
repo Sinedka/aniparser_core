@@ -1,0 +1,468 @@
+// Base models
+
+YANI_MODEL(AnimeStatus,
+    YANI_FIELD(std::string, title)
+    YANI_FIELD_JSON(std::string, class_, "class")
+    YANI_FIELD(std::string, alias)
+    YANI_FIELD(std::int64_t, value)
+)
+
+YANI_MODEL(Poster,
+    YANI_FIELD(std::string, big)
+    YANI_FIELD(std::string, fullsize)
+    YANI_FIELD(std::string, huge)
+    YANI_FIELD(std::string, medium)
+    YANI_FIELD(std::string, small)
+)
+
+YANI_MODEL(Rating,
+    YANI_FIELD(double, average)
+    YANI_FIELD(double, kp_rating)
+    YANI_FIELD(double, anidub_rating)
+    YANI_FIELD(std::int64_t, counters)
+    YANI_FIELD(double, myanimelist_rating)
+    YANI_FIELD(double, shikimori_rating)
+    YANI_FIELD(double, worldart_rating)
+)
+
+YANI_MODEL(AnimeType,
+    YANI_FIELD(std::string, name)
+    YANI_FIELD(std::int64_t, value)
+    YANI_FIELD(std::string, shortname)
+)
+
+YANI_MODEL(MinAge,
+    YANI_FIELD(std::int64_t, value)
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::string, titleLong)
+)
+
+YANI_MODEL(RemoteIds,
+    YANI_FIELD(std::int64_t, worldart_id)
+    YANI_FIELD(std::string, worldart_type)
+    YANI_FIELD(std::int64_t, kp_id)
+    YANI_FIELD(std::int64_t, anidb_id)
+    YANI_FIELD(std::int64_t, sr_id)
+    YANI_FIELD(std::string, anilibria_alias)
+    YANI_FIELD(std::int64_t, shikimori_id)
+    YANI_FIELD(std::int64_t, myanimelist_id)
+)
+
+YANI_MODEL(Creator,
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::int64_t, id)
+    YANI_FIELD(std::string, url)
+)
+
+YANI_MODEL(Studio,
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::int64_t, id)
+    YANI_FIELD(std::string, url)
+)
+
+YANI_MODEL(SkipData,
+    YANI_FIELD(std::string, time)
+    YANI_FIELD(std::string, length)
+)
+
+YANI_MODEL(Skips,
+    YANI_FIELD(SkipData, opening)
+    YANI_FIELD(SkipData, ending)
+)
+
+YANI_MODEL(VideoData,
+    YANI_FIELD(std::string, dubbing)
+    YANI_FIELD(std::string, player)
+)
+
+YANI_MODEL(VideoInfo,
+    YANI_FIELD(std::int64_t, video_id)
+    YANI_FIELD(std::string, iframe_url)
+    YANI_FIELD(VideoData, data)
+    YANI_FIELD(std::string, number)
+    YANI_FIELD(std::int64_t, date)
+    YANI_FIELD(std::int64_t, index)
+    YANI_FIELD(Skips, skips)
+)
+
+YANI_MODEL(Genre,
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::int64_t, id)
+    YANI_FIELD(std::string, alias)
+    YANI_FIELD(std::string, url)
+)
+
+YANI_MODEL(Translates,
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::string, href)
+    YANI_FIELD(std::string, value)
+)
+
+YANI_MODEL(Episodes,
+    YANI_FIELD(std::int64_t, aired)
+    YANI_FIELD(std::int64_t, count)
+    YANI_FIELD(std::int64_t, next_date)
+)
+
+YANI_MODEL(ScreenshotSizes,
+    YANI_FIELD(std::string, small)
+    YANI_FIELD(std::string, full)
+)
+
+YANI_MODEL(RandomScreenshot,
+    YANI_FIELD(ScreenshotSizes, sizes)
+    YANI_FIELD(std::int64_t, id)
+    YANI_FIELD(std::int64_t, time)
+    YANI_FIELD(std::int64_t, episode)
+)
+
+YANI_MODEL(Top,
+    YANI_FIELD(std::int64_t, category)
+    YANI_FIELD(std::int64_t, global)
+)
+
+YANI_MODEL(ViewingOrder,
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::int64_t, anime_id)
+    YANI_FIELD(AnimeType, type)
+    YANI_FIELD(std::string, anime_url)
+    YANI_FIELD(AnimeStatus, anime_status)
+    YANI_FIELD(std::string, description)
+    YANI_FIELD(Poster, poster)
+    YANI_FIELD(std::int64_t, year)
+    YANI_FIELD(std::int64_t, date)
+)
+
+
+// Feed models
+
+YANI_MODEL(FeedRating,
+    YANI_FIELD(std::int64_t, counters)
+    YANI_FIELD(double, average)
+)
+
+YANI_MODEL(FeedMinAge,
+    YANI_FIELD(std::int64_t, value)
+    YANI_FIELD(std::string, title)
+    YANI_FIELD_JSON(std::string, title_long, "title_long")
+)
+
+YANI_MODEL(FeedUserListInfo,
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::string, href)
+    YANI_FIELD(std::int64_t, id)
+)
+
+YANI_MODEL(FeedUserList,
+    YANI_FIELD(bool, is_fav)
+    YANI_FIELD(FeedUserListInfo, list)
+)
+
+YANI_MODEL(FeedUser,
+    YANI_FIELD(FeedUserList, list)
+    YANI_FIELD(double, rating)
+)
+
+YANI_MODEL(FeedRemoteIds,
+    YANI_FIELD(std::int64_t, worldart_id)
+    YANI_FIELD(std::string, worldart_type)
+    YANI_FIELD(std::int64_t, kp_id)
+    YANI_FIELD(std::int64_t, anidub_id)
+    YANI_FIELD(std::int64_t, sr_id)
+    YANI_FIELD(std::string, anilibria_alias)
+    YANI_FIELD(std::int64_t, shikimori_id)
+    YANI_FIELD(std::int64_t, myanimelist_id)
+)
+
+YANI_MODEL(FeedAnimeItem,
+    YANI_FIELD(std::int64_t, anime_id)
+    YANI_FIELD(AnimeStatus, anime_status)
+    YANI_FIELD(std::string, anime_url)
+    YANI_FIELD(Poster, poster)
+    YANI_FIELD(FeedRating, rating)
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(AnimeType, type)
+    YANI_FIELD(std::int64_t, year)
+    YANI_FIELD(std::string, description)
+    YANI_FIELD(std::int64_t, views)
+    YANI_FIELD(std::int64_t, season)
+    YANI_FIELD(FeedMinAge, min_age)
+    YANI_FIELD(FeedUser, user)
+    YANI_FIELD(FeedRemoteIds, remote_ids)
+    YANI_FIELD(Top, top)
+    YANI_FIELD(std::vector<std::string>, blocked_in)
+)
+
+YANI_MODEL(FeedVideoItem,
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::int64_t, date)
+    YANI_FIELD(std::string, description)
+    YANI_FIELD(std::string, ep_title)
+    YANI_FIELD(std::string, player_title)
+    YANI_FIELD(Poster, poster)
+    YANI_FIELD(std::string, anime_url)
+    YANI_FIELD(std::string, dub_title)
+    YANI_FIELD(std::int64_t, anime_id)
+    YANI_FIELD(std::int64_t, video_id)
+)
+
+YANI_MODEL(FeedTopCarousel,
+    YANI_FIELD(std::int64_t, season)
+    YANI_FIELD(std::int64_t, year)
+    YANI_FIELD(std::vector<FeedAnimeItem>, items)
+)
+
+YANI_MODEL(FeedLastWatchScreenshot,
+    YANI_FIELD(std::int64_t, id)
+    YANI_FIELD(std::int64_t, time)
+    YANI_FIELD(std::string, episode)
+    YANI_FIELD(ScreenshotSizes, sizes)
+)
+
+YANI_MODEL(FeedLastWatchItem,
+    YANI_FIELD(std::int64_t, date)
+    YANI_FIELD(std::int64_t, end_time)
+    YANI_FIELD(std::string, anime_url)
+    YANI_FIELD(Poster, poster)
+    YANI_FIELD(std::int64_t, video_id)
+    YANI_FIELD(std::string, description)
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::int64_t, anime_id)
+    YANI_FIELD(bool, do_not_recommend)
+    YANI_FIELD(std::string, ep_title)
+    YANI_FIELD(std::int64_t, duration)
+    YANI_FIELD(FeedLastWatchScreenshot, screenshot)
+)
+
+YANI_MODEL(FeedScheduleEpisodes,
+    YANI_FIELD(std::int64_t, aired)
+    YANI_FIELD(std::int64_t, count)
+    YANI_FIELD(std::int64_t, next_date)
+    YANI_FIELD(std::int64_t, prev_date)
+)
+
+YANI_MODEL(FeedScheduleItem,
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::string, description)
+    YANI_FIELD(Poster, poster)
+    YANI_FIELD(std::string, anime_url)
+    YANI_FIELD(std::int64_t, anime_id)
+    YANI_FIELD(FeedScheduleEpisodes, episodes)
+)
+
+YANI_MODEL(FeedUserIdsShikimori,
+    YANI_FIELD(std::int64_t, id)
+    YANI_FIELD(std::string, nickname)
+)
+
+YANI_MODEL(FeedUserIds,
+    YANI_FIELD(FeedUserIdsShikimori, shikimori)
+    YANI_FIELD(std::string, tg_nickname)
+    YANI_FIELD(std::int64_t, vk)
+)
+
+YANI_MODEL(FeedUserAvatars,
+    YANI_FIELD(std::string, big)
+    YANI_FIELD(std::string, full)
+    YANI_FIELD(std::string, small)
+)
+
+YANI_MODEL(FeedUserBanner,
+    YANI_FIELD(std::string, cropped)
+    YANI_FIELD(std::string, full)
+)
+
+YANI_MODEL(FeedUserTexts,
+    YANI_FIELD(std::int64_t, color)
+    YANI_FIELD(std::string, left)
+    YANI_FIELD(std::string, right)
+)
+
+YANI_MODEL(FeedUserProfile,
+    YANI_FIELD(std::int64_t, id)
+    YANI_FIELD(std::string, nickname)
+    YANI_FIELD(std::string, about)
+    YANI_FIELD(bool, banned)
+    YANI_FIELD(FeedUserIds, ids)
+    YANI_FIELD(FeedUserAvatars, avatars)
+    YANI_FIELD(std::int64_t, bdate)
+    YANI_FIELD(std::int64_t, last_online)
+    YANI_FIELD(std::int64_t, sex)
+    YANI_FIELD(std::vector<std::string>, roles)
+    YANI_FIELD(std::int64_t, register_date)
+    YANI_FIELD(FeedUserTexts, texts)
+    YANI_FIELD(FeedUserBanner, banner)
+)
+
+YANI_MODEL(FeedPostCategory,
+    YANI_FIELD(std::int64_t, id)
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::string, uri)
+)
+
+YANI_MODEL(FeedPostItem,
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::string, preview_image)
+    YANI_FIELD(std::int64_t, id)
+    YANI_FIELD(std::string, content_preview)
+    YANI_FIELD(FeedUserProfile, user)
+    YANI_FIELD(FeedPostCategory, category)
+    YANI_FIELD(std::int64_t, created_at)
+)
+
+YANI_MODEL(FeedPostType,
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::int64_t, id)
+    YANI_FIELD(std::string, uri)
+)
+
+YANI_MODEL(FeedPosts,
+    YANI_FIELD(std::vector<FeedPostItem>, items)
+    YANI_FIELD(std::vector<FeedPostType>, types)
+)
+
+YANI_MODEL(FeedBloggerCategory,
+    YANI_FIELD(std::string, id)
+    YANI_FIELD(std::string, title)
+)
+
+YANI_MODEL(FeedBloggerVideoDescriptions,
+    YANI_FIELD(std::string, big)
+    YANI_FIELD(std::string, small)
+)
+
+YANI_MODEL(FeedBloggerVideoPreviews,
+    YANI_FIELD(std::string, small)
+    YANI_FIELD(std::string, big)
+)
+
+YANI_MODEL(FeedBloggerVideoLikes,
+    YANI_FIELD(std::int64_t, likes)
+    YANI_FIELD(std::int64_t, dislikes)
+    YANI_FIELD(std::int64_t, vote)
+)
+
+YANI_MODEL(FeedBloggerVideoItem,
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::int64_t, id)
+    YANI_FIELD(std::int64_t, time)
+    YANI_FIELD(FeedBloggerCategory, category)
+    YANI_FIELD(std::int64_t, publish_date)
+    YANI_FIELD(std::string, iframe_url)
+    YANI_FIELD(bool, has_spoiler)
+    YANI_FIELD(FeedBloggerVideoDescriptions, descriptions)
+    YANI_FIELD(std::int64_t, comments_count)
+    YANI_FIELD(FeedUserProfile, creator)
+    YANI_FIELD(FeedBloggerVideoPreviews, previews)
+    YANI_FIELD(FeedBloggerVideoLikes, likes)
+    YANI_FIELD(std::int64_t, views)
+    YANI_FIELD(std::string, language)
+)
+
+YANI_MODEL(FeedBloggerVideos,
+    YANI_FIELD(std::vector<FeedBloggerVideoItem>, items)
+    YANI_FIELD(std::vector<FeedBloggerCategory>, categories)
+)
+
+YANI_MODEL(FeedBloggerPeople,
+    YANI_FIELD(std::vector<FeedUserProfile>, items)
+    YANI_FIELD(std::int64_t, count)
+)
+
+YANI_MODEL(FeedBlogger,
+    YANI_FIELD(FeedBloggerVideos, videos)
+    YANI_FIELD(FeedBloggerPeople, people)
+)
+
+YANI_MODEL(FeedCollectionLikes,
+    YANI_FIELD(std::int64_t, likes)
+    YANI_FIELD(std::int64_t, dislikes)
+    YANI_FIELD(std::int64_t, vote)
+)
+
+YANI_MODEL(FeedCollectionOwner,
+    YANI_FIELD(std::int64_t, id)
+    YANI_FIELD(std::string, nickname)
+    YANI_FIELD(FeedUserAvatars, avatars)
+)
+
+YANI_MODEL(FeedCollection,
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(std::string, description)
+    YANI_FIELD(std::int64_t, id)
+    YANI_FIELD(FeedCollectionLikes, likes)
+    YANI_FIELD(std::string, language)
+    YANI_FIELD(std::vector<FeedAnimeItem>, animes)
+    YANI_FIELD(FeedCollectionOwner, owner)
+    YANI_FIELD(std::int64_t, create_date)
+    YANI_FIELD(std::int64_t, views)
+    YANI_FIELD_JSON(bool, public_, "public")
+    YANI_FIELD(std::vector<Poster>, poster_previews)
+)
+
+YANI_MODEL(FeedResponse,
+    YANI_FIELD_JSON(std::vector<FeedAnimeItem>, new_, "new")
+    YANI_FIELD(std::vector<FeedAnimeItem>, announcements)
+    YANI_FIELD(std::vector<FeedAnimeItem>, recommends)
+    YANI_FIELD(std::vector<FeedVideoItem>, new_videos)
+    YANI_FIELD(FeedTopCarousel, top_carousel)
+    YANI_FIELD(std::vector<FeedLastWatchItem>, last_watches)
+    YANI_FIELD(std::vector<FeedScheduleItem>, schedule)
+    YANI_FIELD(FeedPosts, posts)
+    YANI_FIELD(FeedBlogger, blogger)
+    YANI_FIELD(std::vector<FeedCollection>, collections)
+)
+
+
+// Search
+
+YANI_MODEL(SearchResult,
+    YANI_FIELD(std::int64_t, anime_id)
+    YANI_FIELD(AnimeStatus, anime_status)
+    YANI_FIELD(std::string, anime_url)
+    YANI_FIELD(std::string, description)
+    YANI_FIELD(MinAge, min_age)
+    YANI_FIELD(Poster, poster)
+    YANI_FIELD(Rating, rating)
+    YANI_FIELD(RemoteIds, remote_ids)
+    YANI_FIELD(std::int64_t, season)
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(Top, top)
+    YANI_FIELD(AnimeType, type)
+    YANI_FIELD(std::int64_t, views)
+    YANI_FIELD(std::int64_t, year)
+)
+
+
+// Anime
+
+YANI_MODEL(AnimeResult,
+    YANI_FIELD(std::int64_t, anime_id)
+    YANI_FIELD(AnimeStatus, anime_status)
+    YANI_FIELD(std::string, anime_url)
+    YANI_FIELD(Poster, poster)
+    YANI_FIELD(Rating, rating)
+    YANI_FIELD(std::string, title)
+    YANI_FIELD(AnimeType, type)
+    YANI_FIELD(std::int64_t, year)
+    YANI_FIELD(std::string, description)
+    YANI_FIELD(std::int64_t, views)
+    YANI_FIELD(std::int64_t, season)
+    YANI_FIELD(MinAge, min_age)
+    YANI_FIELD(RemoteIds, remote_ids)
+    YANI_FIELD(std::string, original)
+    YANI_FIELD(std::vector<std::string>, other_titles)
+    YANI_FIELD(std::vector<Creator>, creators)
+    YANI_FIELD(std::vector<Studio>, studios)
+    YANI_FIELD(std::vector<VideoInfo>, videos)
+    YANI_FIELD(std::vector<Genre>, genres)
+    YANI_FIELD(std::vector<ViewingOrder>, viewing_order)
+    YANI_FIELD(std::vector<Translates>, translates)
+    YANI_FIELD(std::vector<std::string>, blocked_in)
+    YANI_FIELD(Episodes, episodes)
+    YANI_FIELD(std::int64_t, comments_count)
+    YANI_FIELD(std::int64_t, reviews_count)
+    YANI_FIELD(std::vector<RandomScreenshot>, random_screenshots)
+    YANI_FIELD(Top, top)
+    YANI_FIELD(std::int64_t, posts_count)
+)
