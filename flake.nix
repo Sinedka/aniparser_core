@@ -32,6 +32,8 @@
               nlohmann_json
               cpr
               curl
+              ncurses
+              notcurses
 
               openssl
               pkg-config

@@ -13,3 +13,6 @@ list(APPEND CMAKE_MODULE_PATH
 )
 
 add_subdirectory(src)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_subdirectory(tui)
+endif()

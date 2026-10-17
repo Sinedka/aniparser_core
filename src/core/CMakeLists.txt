@@ -16,7 +16,8 @@ target_include_directories(core
 )
 
 target_link_libraries(core
-    PRIVATE
+    PUBLIC
     api
+    aniparser::cache
 )
 
