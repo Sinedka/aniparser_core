@@ -23,5 +23,5 @@ target_link_libraries(server PUBLIC core)
 
 if(NOT ANDROID AND NOT IOS)
   add_executable(aniparser_server main.cpp)
-  target_link_libraries(aniparser_server PRIVATE server aniparser::cache)
+  target_link_libraries(aniparser_server PRIVATE server)
 endif()

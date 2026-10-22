@@ -1,36 +1,61 @@
-# AniParser TUI
+# TUI — терминальный клиент
 
-The Linux terminal client uses Notcurses for a color UI and terminal bitmap
-graphics. It is built only from its client sources and links Notcurses, CPR,
-and nlohmann/json; it does not link the backend's `core` or `cache` targets.
-Heap names come from the IPC `hello` reply. `CacheReader` maps those heaps with
-read-only mappings and exposes only const Anime, Search, and Feed records. The
-client sends IPC delete requests to release its references. Posters are
-downloaded in a background worker and cached under the system temporary
-directory. Image display depends on the terminal graphics protocol and the
-Notcurses multimedia decoder; terminals without bitmap support show the
-text-and-color layout.
+TUI — самостоятельный Linux-клиент. Он подключается к `aniparser_server` по
+IPC и получает полные JSON-значения. Он не подключает Core/API как библиотеку
+и не читает серверный кэш напрямую.
 
-Build inside the project development shell:
+## Запуск
 
 ```sh
-nix develop
-cmake -S . -B out/Debug
-cmake --build out/Debug --target aniparser_tui -j
+out/Debug/src/server/aniparser_server /tmp/aniparser.sock
+# В другом терминале:
+out/Debug/tui/aniparser_tui /tmp/aniparser.sock
 ```
 
-Start the backend first, then launch the UI from a second terminal:
+Без аргумента клиент использует `/tmp/aniparser.sock`. Он сначала вызывает
+`hello` и завершает работу, если сервер не отвечает протоколом версии 2.
 
-```sh
-out/Debug/src/server/aniparser_server aniparser /tmp/aniparser.sock
-out/Debug/tui/aniparser_tui aniparser /tmp/aniparser.sock
-```
+Чтобы собрать его, нужен Linux, Notcurses, CPR и nlohmann-json; в проекте они
+объявлены через CMake/Nix. Буфер обмена использует любую доступную программу
+из списка `wl-copy`, `xclip`, `xsel`; если их нет, URL всё равно виден в меню,
+но Enter сообщает, что копирование недоступно.
 
-In Feed, arrow keys select poster cards. `/` starts a title search; results
-show larger poster thumbnails with title, year, type, score, episode count,
-and a short description. More results load automatically as you scroll; `n`
-can request the next page early. Enter opens an Anime immediately from its cached
-record while the full details load asynchronously. Press `v` or Enter on the
-details screen to open viewing order, then select an entry and press Enter to
-navigate to it. Escape returns to the previous Anime or list; `f` loads Feed,
-`r` refreshes, and `q` quits.
+## Клавиши и переходы
+
+| Клавиша | Действие |
+| --- | --- |
+| Стрелки вверх/вниз | Переместить выбор или прокрутить длинные ссылки. |
+| Enter в Feed/Search | Открыть выбранное аниме. |
+| `/` | Ввести поисковую строку; Enter запускает поиск, Esc отменяет ввод. |
+| `n` | Показать следующую страницу Search. |
+| `f` | Перезагрузить экран Feed. |
+| Enter в Anime | Открыть список поддержанных плееров. |
+| Enter на плеере/озвучке | Перейти на следующий уровень списка. |
+| Enter на эпизоде | Запросить у сервера ссылки всех доступных качеств. |
+| Стрелки и Enter в ссылках | Выбрать качество и скопировать его полный URL. |
+| `v` в Anime | Показать viewing order. |
+| Esc | Вернуться на предыдущий экран. |
+| `q` | Выйти из TUI. |
+
+Копирование сохраняет ссылку потока в системный clipboard. TUI не запускает
+видеоплеер. Внешний запрос Kodik может занять несколько секунд; во время него
+обрабатывается обычный синхронный IPC-ответ.
+
+## Как устроен клиентский код
+
+- `main.cpp` читает IPC endpoint и вызывает `run`.
+- `ipc_client.hpp` подключается к Unix socket, отправляет JSON Lines, ждёт
+  ответ с request ID и хранит события, пришедшие не к текущему запросу.
+- `tui_app.cpp` владеет экранами, локальными снимками, клавишами и отрисовкой.
+- `clipboard.cpp/.hpp` пробует `wl-copy`, `xclip`, затем `xsel` через argv и
+  stdin (URL не вставляется в shell-команду).
+
+Feed/Search/Anime сразу отображают полученный snapshot. Когда IPC присылает
+`*.updated`, TUI обновляет соответствующий экран/локальную карточку. Ошибки
+Anime refresh видны в status line и пишутся в
+`/tmp/aniparser_tui-anime.log`; поиск пишет ввод и ответы в
+`/tmp/aniparser_tui-search.log`.
+
+При изменении IPC-формы сначала обновите [протокол](../src/server/IPC.md),
+затем этот клиент и README корня. TUI не должен включать заголовки Core или
+серверные cache-модули.

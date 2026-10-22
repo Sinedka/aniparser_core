@@ -6,11 +6,15 @@ add_library(api STATIC)
 target_sources(api
     PRIVATE
         api.cpp
+        kodik.cpp
+        video.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS .
         FILES
             api.hpp
+            kodik.hpp
+            video_extractor.hpp
 )
 
 target_include_directories(api

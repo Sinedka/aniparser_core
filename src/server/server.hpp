@@ -1,37 +1,39 @@
 #pragma once
 
 #include <core.hpp>
+#include <nlohmann/json.hpp>
 
 #include <functional>
-#include <string>
+#include <string_view>
 #include <vector>
 
-// Process-local facade used by the IPC layer. Results crossing the process
-// boundary are shared-memory handles; clients resolve them after mapping the
-// cache segments.
+#include "video_extractor.hpp"
+
+// Application facade. It exposes API models and value types to IPC clients;
+// storage and refresh policy stay encapsulated in Core.
 class Server {
   public:
-  using AnimeCallback =
-      std::function<void(std::int64_t, shm::HeapHandle, bool)>;
-  using SearchCallback =
-      std::function<bool(const yani::SearchInput &, shm::SearchHandle)>;
-  using FeedCallback =
-      std::function<void(const std::vector<std::string> &, shm::HeapHandle)>;
+  using AnimeCallback = Core::AnimeCallback;
+  using SearchCallback = Core::SearchCallback;
+  using FeedCallback = Core::FeedCallback;
 
   explicit Server(Core &core) : core_(core) {}
 
-  shm::HeapHandle getAnime(std::int64_t anime_id, AnimeCallback callback = {});
-  bool animeNeedsRefresh(std::int64_t anime_id);
-  bool animeIsLoaded(std::int64_t anime_id);
-  bool deleteAnime(shm::HeapHandle anime);
+  void getAnime(std::int64_t anime_id, AnimeCallback callback);
+  bool animeNeedsRefresh(std::int64_t anime_id) const;
+  bool animeIsLoaded(std::int64_t anime_id) const;
 
   bool getSearch(yani::SearchInput params, SearchCallback callback);
-  bool searchPageNeedsRefresh(yani::SearchInput params);
-  bool deleteSearch(shm::SearchHandle search);
+  bool searchPageNeedsRefresh(const yani::SearchInput &params) const;
+  bool getFeed(FeedCallback callback);
+  bool feedNeedsRefresh() const;
 
-  bool getFeed(std::vector<std::string> watches, FeedCallback callback);
-  bool feedNeedsRefresh(const std::vector<std::string> &watches);
-  bool deleteFeed(shm::HeapHandle feed);
+  static nlohmann::json animeToJson(const yani::AnimeResult &anime);
+
+  yani::Result<std::string> getVideo(std::string_view iframe,
+                                     std::string_view quality = "720");
+  yani::Result<std::vector<yani::VideoQuality>>
+  getVideoOptions(std::string_view iframe);
 
   private:
   Core &core_;

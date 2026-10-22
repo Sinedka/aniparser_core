@@ -3,6 +3,10 @@
 #include "json.hpp"
 // IWYU pragma: end_exports
 
+#include <array>
+#include <charconv>
+#include <chrono>
+#include <limits>
 #include <memory>
 #include <type_traits>
 
@@ -26,6 +30,16 @@ template <typename T> std::string queryValue(const T &value) {
   if constexpr (std::is_same_v<T, bool>) {
 
     return value ? "true" : "false";
+
+  } else if constexpr (std::is_floating_point_v<T>) {
+
+    std::array<char, 128> buffer{};
+    const auto result = std::to_chars(
+        buffer.data(), buffer.data() + buffer.size(), value,
+        std::chars_format::general, std::numeric_limits<T>::max_digits10);
+    if (result.ec != std::errc{})
+      throw std::runtime_error("Failed to format floating-point query value");
+    return {buffer.data(), result.ptr};
 
   } else if constexpr (std::is_arithmetic_v<T>) {
 
@@ -122,7 +136,9 @@ request_async(std::string path, cpr::Parameters params, Convert convert) {
           }
         },
         cpr::Url{BASE_URL + path}, std::move(params),
-        cpr::Header{{"Lang", "ru"}});
+        cpr::Header{{"Lang", "ru"}},
+        cpr::ConnectTimeout{std::chrono::seconds(15)},
+        cpr::Timeout{std::chrono::seconds(30)});
   } catch (const std::exception &e) {
     promise->set_value(std::unexpected(
         ApiError{.status = 0, .message = e.what(), .data = {}}));
@@ -164,7 +180,9 @@ cpr::Parameters search_parameters(const SearchInput &input) {
 Result<nlohmann::json> get(std::string_view path,
                            const cpr::Parameters &params) {
   const auto response = cpr::Get(cpr::Url{BASE_URL + std::string(path)}, params,
-                                 cpr::Header{{"Lang", "ru"}});
+                                 cpr::Header{{"Lang", "ru"}},
+                                 cpr::ConnectTimeout{std::chrono::seconds(15)},
+                                 cpr::Timeout{std::chrono::seconds(30)});
   return parse_response(response);
 }
 
@@ -236,12 +254,8 @@ searchTitlesAsync(SearchInput input) {
 // getFeed
 // ============================================================
 
-Result<FeedResponse> getFeed(const std::vector<std::string> &watches) {
-  cpr::Parameters params;
-
-  if (!watches.empty()) { params.Add({"watches", join(watches)}); }
-
-  auto response = get("feed", params);
+Result<FeedResponse> getFeed() {
+  auto response = get("feed");
 
   if (!response) return std::unexpected(response.error());
 
@@ -256,14 +270,10 @@ Result<FeedResponse> getFeed(const std::vector<std::string> &watches) {
   }
 }
 
-std::future<Result<FeedResponse>>
-getFeedAsync(std::vector<std::string> watches) {
-  cpr::Parameters params;
-  if (!watches.empty()) params.Add({"watches", join(watches)});
-  return request_async<FeedResponse>(
-      "feed", std::move(params), [](const nlohmann::json &raw) {
-        return raw.at("response").get<FeedResponse>();
-      });
+std::future<Result<FeedResponse>> getFeedAsync() {
+  return request_async<FeedResponse>("feed", {}, [](const nlohmann::json &raw) {
+    return raw.at("response").get<FeedResponse>();
+  });
 }
 
 } // namespace yani

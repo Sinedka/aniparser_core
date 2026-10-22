@@ -1,61 +1,113 @@
 #include "server.hpp"
 
-shm::HeapHandle Server::getAnime(std::int64_t anime_id,
-                                 AnimeCallback callback) {
-  auto* anime =
-      core_.getAnime(anime_id, [callback = std::move(callback)](
-                                   std::int64_t updated_id, Anime* updated) {
-        if (callback)
-          callback(updated_id, updated ? updated->self : shm::HeapHandle{},
-                   updated != nullptr);
-      });
-  return anime ? anime->self : shm::HeapHandle{};
+#include <algorithm>
+#include <charconv>
+#include <cmath>
+
+#include "json.hpp"
+#include "kodik.hpp"
+
+void Server::getAnime(std::int64_t anime_id, AnimeCallback callback) {
+  core_.getAnime(anime_id, std::move(callback), true);
 }
 
-bool Server::animeNeedsRefresh(std::int64_t anime_id) {
+bool Server::animeNeedsRefresh(std::int64_t anime_id) const {
   return core_.animeNeedsRefresh(anime_id);
 }
 
-bool Server::animeIsLoaded(std::int64_t anime_id) {
+bool Server::animeIsLoaded(std::int64_t anime_id) const {
   return core_.animeIsLoaded(anime_id);
 }
 
-bool Server::deleteAnime(shm::HeapHandle anime) {
-  return anime && core_.releaseAnime(anime);
-}
-
 bool Server::getSearch(yani::SearchInput params, SearchCallback callback) {
-  if (!callback) return false;
-  return core_.searchTitles(
-      std::move(params),
-      [callback = std::move(callback)](const yani::SearchInput &page_params,
-                                       SharedSearch* page) {
-        return callback(page_params, page ? page->root : shm::SearchHandle{});
-      });
+  return core_.getSearch(std::move(params), std::move(callback));
 }
 
-bool Server::searchPageNeedsRefresh(yani::SearchInput params) {
-  return core_.searchPageNeedsRefresh(std::move(params));
+bool Server::searchPageNeedsRefresh(const yani::SearchInput &params) const {
+  return core_.searchPageNeedsRefresh(params);
 }
 
-bool Server::deleteSearch(shm::SearchHandle search) {
-  return search && core_.releaseSearch(search);
+bool Server::getFeed(FeedCallback callback) {
+  return core_.getFeed(std::move(callback));
 }
 
-bool Server::getFeed(std::vector<std::string> watches, FeedCallback callback) {
-  if (!callback) return false;
-  return core_.getFeed(
-      std::move(watches),
-      [callback = std::move(callback)](
-          const std::vector<std::string> &requested_watches, SharedFeed* feed) {
-        callback(requested_watches, feed ? feed->self : shm::HeapHandle{});
-      });
+bool Server::feedNeedsRefresh() const { return core_.feedNeedsRefresh(); }
+
+nlohmann::json Server::animeToJson(const yani::AnimeResult &anime) {
+  nlohmann::json result = anime;
+  result.erase("videos");
+  result["players"] = nlohmann::json::array();
+
+  for (const auto &video : anime.videos) {
+    if (!yani::supportsVideo(video.iframe_url) || video.data.player.empty() ||
+        video.data.dubbing.empty())
+      continue;
+
+    auto &players = result["players"];
+    auto player =
+        std::find_if(players.begin(), players.end(), [&](const auto &item) {
+          return item.value("name", std::string{}) == video.data.player;
+        });
+    if (player == players.end()) {
+      players.push_back(
+          {{"name", video.data.player}, {"dubbers", nlohmann::json::array()}});
+      player = std::prev(players.end());
+    }
+
+    auto &dubbers = (*player)["dubbers"];
+    auto dubber =
+        std::find_if(dubbers.begin(), dubbers.end(), [&](const auto &item) {
+          return item.value("name", std::string{}) == video.data.dubbing;
+        });
+    if (dubber == dubbers.end()) {
+      dubbers.push_back({{"name", video.data.dubbing},
+                         {"episodes", nlohmann::json::array()}});
+      dubber = std::prev(dubbers.end());
+    }
+    (*dubber)["episodes"].push_back({{"video_id", video.video_id},
+                                     {"iframe_url", video.iframe_url},
+                                     {"number", video.number},
+                                     {"date", video.date},
+                                     {"index", video.index},
+                                     {"skips", video.skips}});
+  }
+
+  const auto episode_number =
+      [](const nlohmann::json &episode) -> std::optional<double> {
+    const auto number = episode.value("number", std::string{});
+    double value = 0;
+    const auto parsed =
+        std::from_chars(number.data(), number.data() + number.size(), value);
+    if (parsed.ec != std::errc{} ||
+        parsed.ptr != number.data() + number.size() || !std::isfinite(value))
+      return std::nullopt;
+    return value;
+  };
+  for (auto &player : result["players"])
+    for (auto &dubber : player["dubbers"]) {
+      auto &episodes = dubber["episodes"];
+      std::stable_sort(episodes.begin(), episodes.end(),
+                       [&](const auto &left, const auto &right) {
+                         const auto left_number = episode_number(left);
+                         const auto right_number = episode_number(right);
+                         if (left_number && right_number)
+                           return *left_number < *right_number;
+                         if (left_number.has_value() !=
+                             right_number.has_value())
+                           return left_number.has_value();
+                         return left.value("number", std::string{}) <
+                                right.value("number", std::string{});
+                       });
+    }
+  return result;
 }
 
-bool Server::feedNeedsRefresh(const std::vector<std::string> &watches) {
-  return core_.feedNeedsRefresh(watches);
+yani::Result<std::string> Server::getVideo(std::string_view iframe,
+                                           std::string_view quality) {
+  return yani::getVideo(iframe, quality);
 }
 
-bool Server::deleteFeed(shm::HeapHandle feed) {
-  return feed && core_.releaseFeed(feed);
+yani::Result<std::vector<yani::VideoQuality>>
+Server::getVideoOptions(std::string_view iframe) {
+  return yani::getVideoOptions(iframe);
 }

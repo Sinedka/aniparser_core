@@ -1,6 +1,5 @@
 add_subdirectory(common)
 add_subdirectory(api)
-add_subdirectory(cache)
 add_subdirectory(core)
 add_subdirectory(server)
 if(UNIX AND NOT ANDROID AND NOT IOS)

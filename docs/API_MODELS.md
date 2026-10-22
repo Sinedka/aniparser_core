@@ -1,6 +1,15 @@
-# Каталог API-структур
+# Справочник API-моделей
 
-Это справочник всех типов, объявленных через `YANI_MODEL` в `src/api/models.def`. Поле и тип приведены из исходной схемы; JSON-имя отличается от имени C++ только там, где указан alias. Все поля создаются value-initialized. Структуры не являются optional целиком: при отсутствующем поле конвертер применяет `yani_null_value<T>` или `T{}`.
+В этом файле описаны все 56 структур, объявленные через `YANI_MODEL` в
+`src/api/models.def`. Он описывает форму внешнего API и C++-модели в `src/api/`.
+Это **не** полная схема каждого IPC-ответа: перед отправкой Anime сервер
+заменяет `videos` на сгруппированные `players` (см. ниже и
+[IPC-спецификацию](../src/server/IPC.md#anime-и-video-json)).
+
+Для каждого поля таблица показывает C++-имя, C++-тип и имя JSON API. В обычном
+случае имя одинаковое; явное отличие задано через `YANI_FIELD_JSON` в
+`models.def`. Все поля создаются со значением по умолчанию. Если поле отсутствует
+или равно null, применяются правила `yani_null_value<T>` из `src/api/json.hpp`.
 
 ## Содержание
 
@@ -644,4 +653,20 @@
 
 ## Правила чтения каталога
 
-`YANI_FIELD_JSON(type, member, json_name)` задаёт явное имя ключа JSON; например `class_` читается из `class`, `new_` из `new`, `public_` из `public`. `YANI_FIELD(type, member)` использует имя члена как ключ. Реальные допуски типов при чтении описаны в [API](API.md), а subset, который попадает в shared memory, — в [маппинге структур](STRUCTURES.md).
+`YANI_FIELD_JSON(type, member, json_name)` задаёт явное имя ключа JSON;
+например `class_` читается из `class`, `new_` из `new`, `public_` из `public`.
+`YANI_FIELD(type, member)` использует имя C++ члена как имя API JSON. Допуски
+типов и специальные null defaults описаны в [API](API.md).
+
+### Важное отличие Anime в IPC
+
+Таблица `AnimeResult` выше — API-модель. Её сырые видео находятся в
+`videos: VideoInfo[]`. IPC-сервер в `Server::animeToJson` группирует их как
+`players[].dubbers[].episodes[]`, сортирует эпизоды и удаляет `videos` из
+клиентского JSON. Поля episode остаются `video_id`, `iframe_url`, `number`,
+`date`, `index`, `skips`. Это преобразование описано в
+[SERVER.md](SERVER.md#anime-json) и [IPC.md](../src/server/IPC.md).
+
+При изменении `models.def` обновляйте этот справочник. При изменении группировки
+IPC обновляйте protocol-документы и клиентские модели; править API `AnimeResult`
+ради одного IPC представления не нужно.

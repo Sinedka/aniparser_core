@@ -1,107 +1,98 @@
 #pragma once
 
 #include <api.hpp>
-#include <cache.hpp>
 
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
-#include <cstdint>
+#include <deque>
 #include <functional>
-#include <future>
 #include <mutex>
+#include <optional>
 #include <string>
-#include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+class TaskPool {
+  public:
+  TaskPool(std::size_t workers, std::size_t queue_limit);
+  ~TaskPool();
+  TaskPool(const TaskPool &) = delete;
+  TaskPool &operator=(const TaskPool &) = delete;
+
+  bool submit(std::function<void()> task);
+  void shutdown();
+
+  private:
+  void worker_loop();
+  const std::size_t queue_limit_;
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::condition_variable space_available_;
+  std::deque<std::function<void()>> queue_;
+  std::vector<std::thread> workers_;
+  bool stopping_ = false;
+};
+
+// Owns process-local API snapshots. The IPC layer receives value copies and
+// never observes storage addresses or cache implementation details.
 class Core {
   public:
-  using AnimeUpdateCallback = std::function<void(std::int64_t, Anime*)>;
-  using SearchPageCallback =
-      std::function<bool(const yani::SearchInput &, SharedSearch*)>;
-  using FeedCallback =
-      std::function<void(const std::vector<std::string> &, SharedFeed*)>;
+  using AnimeCallback = std::function<void(std::int64_t,
+                                           std::optional<yani::AnimeResult>,
+                                           bool updated,
+                                           std::optional<yani::ApiError>)>;
+  using SearchCallback = std::function<void(
+      yani::SearchInput, std::vector<yani::SearchResult>, bool updated)>;
+  using FeedCallback = std::function<void(yani::FeedResponse, bool updated)>;
 
-  explicit Core(shm::IShmSegmentProvider &provider,
-                std::string cache_name,
-                std::size_t anime_segment_size = 8 * 1024 * 1024,
-                std::size_t variable_segment_size = 32 * 1024 * 1024);
+  Core();
   ~Core();
-
   Core(const Core &) = delete;
   Core &operator=(const Core &) = delete;
 
-  // Open an existing cache or create a new one.
-  bool initialize();
+  void getAnime(std::int64_t anime_id,
+                AnimeCallback callback,
+                bool need_videos = true);
+  bool animeNeedsRefresh(std::int64_t anime_id) const;
+  bool animeIsLoaded(std::int64_t anime_id) const;
 
-  // Fetch from the API, convert the full result, and store it in shared memory.
-  yani::Result<shm::HeapHandle> getAnime(std::string_view alias_or_id,
-                                         bool need_videos = false);
+  bool getSearch(yani::SearchInput params, SearchCallback callback);
+  bool searchPageNeedsRefresh(const yani::SearchInput &params) const;
 
-  // Return the cached slot immediately, then refresh it from the API. The
-  // callback receives nullptr if the refresh fails.
-  Anime* getAnime(std::int64_t anime_id, AnimeUpdateCallback callback);
-
-  // Fetch pages asynchronously. Each request uses limit=10 and increments
-  // offset by 10. Return true from the callback to request the next page;
-  // false stops pagination. The caller owns delivered pages and can release
-  // the chain from its root handle with releaseSearch().
-  bool searchTitles(yani::SearchInput params, SearchPageCallback callback);
-  bool searchPageNeedsRefresh(yani::SearchInput params);
-  SharedSearch* resolveSearch(shm::SearchHandle handle);
-  bool releaseSearch(shm::SearchHandle handle);
-
-  bool getFeed(std::vector<std::string> watches, FeedCallback callback);
-  bool feedNeedsRefresh(const std::vector<std::string> &watches);
-  SharedFeed* resolveFeed(shm::HeapHandle handle);
-  bool releaseFeed(shm::HeapHandle handle);
-
-  Anime* resolveAnime(shm::HeapHandle handle);
-  bool releaseAnime(shm::HeapHandle handle);
-  bool releaseAnime(Anime* anime);
+  bool getFeed(FeedCallback callback);
+  bool feedNeedsRefresh() const;
 
   private:
-  shm::IShmSegmentProvider &provider_;
-  std::string cache_name_;
-  std::size_t anime_segment_size_;
-  std::size_t variable_segment_size_;
-  bool initialized_ = false;
-
+  using Clock = std::chrono::steady_clock;
   struct AnimeEntry {
-    shm::HeapHandle handle{};
+    yani::AnimeResult value;
+    Clock::time_point refreshed_at{};
+    bool has_full_details = false;
     bool updating = false;
-    bool loaded_full = false;
-    std::chrono::steady_clock::time_point last_api_request{};
-    std::vector<AnimeUpdateCallback> callbacks;
+    std::vector<AnimeCallback> callbacks;
+  };
+  struct SearchEntry {
+    std::vector<yani::SearchResult> value;
+    Clock::time_point refreshed_at{};
   };
 
-  struct CachedSearchPage {
-    std::chrono::steady_clock::time_point last_requested_at;
-    std::vector<yani::SearchResult> results;
-  };
-
-  std::mutex entries_mutex_;
-  bool shutting_down_ = false;
-  std::unordered_map<std::int64_t, AnimeEntry> anime_by_id_;
-  std::mutex search_cache_mutex_;
-  std::unordered_map<std::string, CachedSearchPage> search_cache_;
-  struct CachedFeed {
-    std::chrono::steady_clock::time_point last_api_request;
-    yani::FeedResponse response;
-  };
-  std::mutex feed_cache_mutex_;
-  std::unordered_map<std::string, CachedFeed> feed_cache_;
-  std::mutex tasks_mutex_;
-  std::vector<std::future<void>> update_tasks_;
-  std::mutex maintenance_mutex_;
-  std::condition_variable_any maintenance_cv_;
-  std::jthread maintenance_thread_;
-  void maintenance_loop(std::stop_token token);
-  void cleanup_idle_cache();
-  bool animeNeedsRefresh(std::int64_t anime_id);
-  bool animeIsLoaded(std::int64_t anime_id);
-
-  friend class Server;
+  static std::string search_key(const yani::SearchInput &params);
+  AnimeEntry* find_or_create_anime_locked(std::int64_t anime_id);
+  void
+  cache_search_results_locked(const std::vector<yani::SearchResult> &results);
+  void cache_feed_results_locked(const yani::FeedResponse &feed);
+  TaskPool tasks_{4, 128};
+  mutable std::mutex mutex_;
+  std::unordered_map<std::int64_t, AnimeEntry> anime_;
+  std::unordered_map<std::string, SearchEntry> searches_;
+  std::unordered_map<std::string, std::vector<SearchCallback>>
+      search_callbacks_;
+  std::unordered_set<std::string> search_updating_;
+  std::optional<yani::FeedResponse> feed_;
+  Clock::time_point feed_refreshed_at_{};
+  bool feed_updating_ = false;
+  std::vector<FeedCallback> feed_callbacks_;
 };
