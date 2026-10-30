@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a C++23 project. `src/api/` implements HTTP access and JSON models; `src/core/` coordinates process-local caching and asynchronous work; `src/server/` provides JSON IPC; `src/common/` contains shared types; and `src/app/` has a manual integration executable. The Linux-only `tui/` is a separate IPC client, not a backend module. Russian documentation is in `docs/`. Build output belongs in `out/`.
+This is a C++23 project. `src/api/` implements HTTP access and API models; `src/core/` coordinates process-local caching and asynchronous work; `src/core/cache/` contains AnimeCache, shared user collections and SaveManager; `src/server/` provides the JSON IPC facade; and `src/server/ipc/` contains the Unix and Windows transports. `src/app/` has a manual integration executable. The Linux-only `tui/` is a separate IPC client, not a backend module. Russian documentation is in `docs/`. Build output belongs in `out/`.
 
 ## Build, Test, and Development Commands
 
@@ -26,7 +26,7 @@ IPC transmits complete JSON values. Include a request ID in every response and a
 
 ## Testing and Pull Requests
 
-For code changes, build the affected target with `cmake --build out/Debug -j2`; add tests only when introducing or extending configured test infrastructure. The Git history has short informal subjects and no strict convention; prefer an imperative subject naming the changed area. Pull requests should explain behavior and motivation, list checks performed, link issues when relevant, and include screenshots for visible TUI changes.
+For code changes, build the affected target with `cmake --build out/Debug -j2`; there is no configured unit-test framework, so add tests only when introducing or extending test infrastructure. `my_app --self-test` is a manual check and does not call the network; `my_app --test-get-anime` is an external API integration check. The Git history has short informal subjects and no strict convention; prefer an imperative subject naming the changed area. Pull requests should explain behavior and motivation, list checks performed, link issues when relevant, and include screenshots for visible TUI changes.
 
 ## Configuration Notes
 

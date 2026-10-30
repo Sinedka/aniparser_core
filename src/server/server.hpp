@@ -14,21 +14,73 @@
 class Server {
   public:
   using AnimeCallback = Core::AnimeCallback;
+  using AnimeSubscriptionId = Core::AnimeSubscriptionId;
   using SearchCallback = Core::SearchCallback;
   using FeedCallback = Core::FeedCallback;
+  using HistoryCallback = Core::HistoryCallback;
+  using HistorySubscriptionId = Core::HistorySubscriptionId;
+  using HistorySnapshot = Core::HistorySnapshot;
 
   explicit Server(Core &core) : core_(core) {}
 
-  void getAnime(std::int64_t anime_id, AnimeCallback callback);
+  AnimeSubscriptionId subscribeAnime(std::int64_t anime_id,
+                                     AnimeCallback callback);
+  bool unsubscribeAnime(AnimeSubscriptionId subscription_id);
   bool animeNeedsRefresh(std::int64_t anime_id) const;
   bool animeIsLoaded(std::int64_t anime_id) const;
 
-  bool getSearch(yani::SearchInput params, SearchCallback callback);
+  bool subscribeSearch(yani::SearchInput params, SearchCallback callback);
   bool searchPageNeedsRefresh(const yani::SearchInput &params) const;
-  bool getFeed(FeedCallback callback);
+  bool subscribeFeed(FeedCallback callback);
   bool feedNeedsRefresh() const;
 
+  bool addHistory(std::int64_t anime_id);
+  bool removeHistory(std::int64_t anime_id);
+  bool updateAnimeSaveData(Core::AnimeSaveData data);
+  std::optional<Core::AnimeSaveData>
+  getAnimeSaveData(std::int64_t anime_id) const;
+  std::vector<Core::HistoryEntry> getHistory() const;
+  HistorySnapshot getHistorySnapshot(std::size_t offset = 0,
+                                     std::size_t limit = 20) const;
+  std::uint64_t getHistoryRevision() const;
+  HistorySubscriptionId subscribeHistory(HistoryCallback callback,
+                                         std::size_t offset = 0,
+                                         std::size_t limit = 20);
+  void cancelHistorySubscription(HistorySubscriptionId subscription_id);
+
+  bool addFavorite(std::int64_t anime_id);
+  bool removeFavorite(std::int64_t anime_id);
+  bool isFavorite(std::int64_t anime_id) const;
+  int getStatus(std::int64_t anime_id) const;
+  HistorySnapshot getFavoritesSnapshot(std::size_t offset = 0,
+                                       std::size_t limit = 20) const;
+  std::uint64_t getFavoritesRevision() const;
+  HistorySubscriptionId subscribeFavorites(HistoryCallback callback,
+                                           std::size_t offset = 0,
+                                           std::size_t limit = 20);
+  void cancelFavoritesSubscription(HistorySubscriptionId subscription_id);
+
+#define DECLARE_ANIME_STATUS(Name)                                             \
+  bool add##Name(std::int64_t anime_id);                                       \
+  bool remove##Name(std::int64_t anime_id);                                    \
+  bool is##Name(std::int64_t anime_id) const;                                  \
+  HistorySnapshot get##Name##Snapshot(std::size_t offset = 0,                  \
+                                      std::size_t limit = 20) const;           \
+  std::uint64_t get##Name##Revision() const;                                   \
+  HistorySubscriptionId subscribe##Name(HistoryCallback callback,              \
+                                        std::size_t offset = 0,                \
+                                        std::size_t limit = 20);               \
+  void cancel##Name##Subscription(HistorySubscriptionId subscription_id);
+  DECLARE_ANIME_STATUS(Planned)
+  DECLARE_ANIME_STATUS(Watched)
+  DECLARE_ANIME_STATUS(Completed)
+  DECLARE_ANIME_STATUS(Dropped)
+#undef DECLARE_ANIME_STATUS
+
   static nlohmann::json animeToJson(const yani::AnimeResult &anime);
+  static nlohmann::json
+  historyToJson(const std::vector<Core::HistoryItem> &history);
+  static nlohmann::json animeSaveDataToJson(const Core::AnimeSaveData &data);
 
   yani::Result<std::string> getVideo(std::string_view iframe,
                                      std::string_view quality = "720");

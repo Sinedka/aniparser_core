@@ -158,7 +158,12 @@ class TuiApplication {
     , context_(context)
     , plane_(notcurses_stdplane(context)) {}
 
-  void initialize() { load_feed(); }
+  void initialize() {
+    const auto reply =
+        ipc_.request("subscribeHistory", {{"offset", 0}, {"limit", 20}});
+    updateHistory(reply);
+    load_feed();
+  }
   int run() {
     bool running = true;
     while (running) {
@@ -201,7 +206,7 @@ class TuiApplication {
 
   void load_feed() {
     try {
-      const auto reply = ipc_.request("getFeed");
+      const auto reply = ipc_.request("subscribeFeed");
       if (!reply.value("ok", false))
         throw std::runtime_error(reply.value("error", "Feed failed"));
       update_feed(reply.value("feed", Json::object()));
@@ -285,10 +290,10 @@ class TuiApplication {
                "request scheduled: q=" + Json(query).dump() +
                    " offset=" + std::to_string(offset));
       const auto reply = ipc_.request(
-          "getSearch",
+          "subscribeSearch",
           {{"params", {{"q", query}, {"offset", offset}, {"limit", 10}}}});
       log_line("/tmp/aniparser_tui-search.log",
-               "getSearch reply: " + reply.dump());
+               "subscribeSearch reply: " + reply.dump());
       if (!reply.value("ok", false))
         throw std::runtime_error(reply.value("error", "Search failed"));
       search_request_id_ = reply.value("id", int64_t{-1});
@@ -305,7 +310,7 @@ class TuiApplication {
     try {
       return_screen_ = screen_;
       return_selected_ = selected_;
-      const auto reply = ipc_.request("getAnime", {{"anime_id", id}});
+      const auto reply = ipc_.request("subscribeAnime", {{"anime_id", id}});
       if (!reply.value("ok", false))
         throw std::runtime_error(reply.value("error", "Anime request failed"));
       detail_request_id_ = reply.value("id", int64_t{-1});
@@ -523,11 +528,30 @@ class TuiApplication {
             status_ += " (HTTP " + std::to_string(api_status) + ")";
           if (!error.empty()) status_ += ": " + error;
         }
+      } else if (type == "history.updated") {
+        updateHistory(event);
       }
       selected_ = active_menu_size() == 0
                       ? 0
                       : std::min(selected_, active_menu_size() - 1);
     }
+  }
+
+  void updateHistory(const Json &message) {
+    const auto revision = message.value("revision", history_revision_);
+    if (revision < history_revision_) return;
+    const bool updated =
+        message.value("event", std::string{}) == "history.updated";
+    const auto sequence = message.value("sequence", std::uint64_t{0});
+    if (sequence < history_sequence_ ||
+        (updated && sequence <= history_sequence_))
+      return;
+    const auto items = message.value("items", Json::array());
+    if (!items.is_array()) return;
+    history_ = items;
+    history_revision_ = revision;
+    history_sequence_ = sequence;
+    if (updated) status_ = "History updated";
   }
 
   void text(int y,
@@ -727,6 +751,9 @@ class TuiApplication {
   std::string status_ = "Ready";
   Json feed_ = Json::object();
   Json detail_ = Json::object();
+  Json history_ = Json::array();
+  std::uint64_t history_revision_ = 0;
+  std::uint64_t history_sequence_ = 0;
   std::vector<AnimeRow> feed_rows_;
   std::vector<AnimeRow> search_rows_;
   std::vector<AnimeRow> viewing_rows_;
@@ -743,7 +770,7 @@ int run(const std::string &endpoint) {
   }
   try {
     const auto hello = ipc.request("hello");
-    if (!hello.value("ok", false) || hello.value("protocol", 0) != 2)
+    if (!hello.value("ok", false) || hello.value("protocol", 0) != 3)
       throw std::runtime_error("IPC protocol is incompatible");
     auto* context = notcurses_init(nullptr, stdout);
     if (!context) throw std::runtime_error("Cannot initialize notcurses");

@@ -1,4 +1,4 @@
-# IPC protocol, version 2
+# IPC protocol, version 3
 
 Эта страница — краткая спецификация для автора клиента. Полный пример запуска
 и Python-клиент находятся в корневом [README](../../README.md#подключение-своего-клиента).
@@ -11,7 +11,12 @@
 - Stream не сохраняет границы `send`/`recv`. Клиент собирает буфер и разбирает
   его только по LF; один `recv` может содержать часть строки или несколько строк.
 - Максимальный размер одной команды сервера — 1 MiB.
-- Первым запросом следует отправить `hello`. Протокол сейчас версии `2`.
+- Первым запросом следует отправить `hello`. Протокол сейчас версии `3`.
+- В версии 3 запросы, которые возвращают snapshot и события обновления,
+  называются `subscribeAnime`, `subscribeSearch`, `subscribeFeed`,
+  `subscribeHistory`, `subscribeFavorites` и `subscribePlanned`/
+  `subscribeWatched`/`subscribeCompleted`/`subscribeDropped`. Старые потоковые
+  имена `get...` больше не поддерживаются.
 - Клиент создаёт `id` и использует его для сопоставления ответов. Рекомендуется
   уникальное целое число на одном соединении.
 
@@ -23,7 +28,7 @@ Windows-клиент открывает pipe как byte stream с duplex-дос
 
 ```json
 {"id":1,"method":"hello"}
-{"id":1,"ok":true,"protocol":2,"transport":"json-lines"}
+{"id":1,"ok":true,"protocol":3,"transport":"json-lines"}
 ```
 
 Успешный ответ содержит `ok:true`; ошибка — `ok:false` и человекочитаемое
@@ -32,23 +37,59 @@ Windows-клиент открывает pipe как byte stream с duplex-дос
 ## Запросы
 
 ```json
-{"id":2,"method":"getFeed"}
-{"id":3,"method":"getSearch","params":{"q":"магическая битва","offset":0,"limit":10}}
-{"id":4,"method":"getAnime","anime_id":771}
+{"id":2,"method":"subscribeFeed"}
+{"id":3,"method":"subscribeSearch","params":{"q":"магическая битва","offset":0,"limit":10}}
+{"id":4,"method":"subscribeAnime","anime_id":771}
 {"id":5,"method":"getVideoOptions","iframe":"//kodikplayer.com/season/1/example/720p"}
 {"id":6,"method":"getVideo","iframe":"//kodikplayer.com/season/1/example/720p","quality":"720"}
+{"id":7,"method":"subscribeHistory","offset":0,"limit":20}
+{"id":8,"method":"addHistory","anime_id":771}
+{"id":9,"method":"removeHistory","anime_id":771}
+{"id":10,"method":"updateAnimeSaveData","anime_id":771,"player":"Kodik","dubber":"Озвучка","episode":"1","time":312}
+{"id":11,"method":"getAnimeSaveData","anime_id":771}
+{"id":12,"method":"unsubscribeHistory"}
+{"id":13,"method":"unsubscribeSearch","target_id":3}
+{"id":14,"method":"subscribeFavorites","offset":0,"limit":20}
+{"id":15,"method":"addFavorite","anime_id":771}
+{"id":16,"method":"removeFavorite","anime_id":771}
+{"id":17,"method":"unsubscribeFavorites"}
+{"id":18,"method":"subscribePlanned","offset":0,"limit":20}
+{"id":19,"method":"addPlanned","anime_id":771}
+{"id":20,"method":"removePlanned","anime_id":771}
+{"id":21,"method":"subscribeWatched","offset":0,"limit":20}
+{"id":22,"method":"subscribeCompleted","offset":0,"limit":20}
+{"id":23,"method":"subscribeDropped","offset":0,"limit":20}
+{"id":24,"method":"isFavorite","anime_id":771}
+{"id":25,"method":"getStatus","anime_id":771}
 ```
 
 ### Ответы
 
 | Метод | Поля успешного ответа |
 | --- | --- |
-| `hello` | `protocol:2`, `transport:"json-lines"` |
-| `getFeed` | `feed`, `refreshing` |
-| `getSearch` | `results`, `offset`, `limit`, `refreshing` |
-| `getAnime` | `anime`, `refreshing`, `loaded` |
+| `hello` | `protocol:3`, `transport:"json-lines"` |
+| `subscribeFeed` | `feed`, `refreshing`; затем `feed.updated` |
+| `subscribeSearch` | `results`, `offset`, `limit`, `refreshing`; затем `search.updated` |
+| `subscribeAnime` | `anime`, `refreshing`, `loaded`; затем `anime.updated` |
+| `unsubscribeAnime`, `unsubscribeSearch`, `unsubscribeFeed` | отменяет ожидание обновления, указанное через `target_id` |
 | `getVideoOptions` | `qualities` — массив `{quality,url}` |
 | `getVideo` | `url` |
+| `subscribeHistory` | `items`, `offset`, `limit`, `revision`, `sequence`, `refreshing`; затем `history.updated` с тем же `id` |
+| `unsubscribeHistory` | отмена подписок истории на этом соединении |
+| `addHistory` | добавленный `anime_id` и `revision` |
+| `removeHistory` | `anime_id`, `removed` и `revision` |
+| `subscribeFavorites` | страница `items`, `revision`, `sequence`, `refreshing`; затем `favorites.updated` |
+| `unsubscribeFavorites` | отмена подписки избранного на этом соединении |
+| `addFavorite` | добавленный `anime_id` и `revision` |
+| `removeFavorite` | `anime_id`, `removed` и `revision` |
+| `subscribePlanned`, `subscribeWatched`, `subscribeCompleted`, `subscribeDropped` | страница `items`, `revision`, `sequence`, `refreshing`; затем соответствующее `.updated` событие |
+| `unsubscribePlanned`, `unsubscribeWatched`, `unsubscribeCompleted`, `unsubscribeDropped` | отмена подписки статуса на этом соединении |
+| `addPlanned`, `addWatched`, `addCompleted`, `addDropped` | добавленный `anime_id` и revision |
+| `removePlanned`, `removeWatched`, `removeCompleted`, `removeDropped` | `anime_id`, `removed` и revision |
+| `isFavorite` | `anime_id`; ответ содержит boolean `value` |
+| `getStatus` | `anime_id`; ответ содержит integer `status` |
+| `getAnimeSaveData` | `save_data` (объект или `null`) |
+| `updateAnimeSaveData` | сохранённый `save_data` и `revision` |
 
 Все ответы включают исходный `id` и `ok`. При пустом Anime-кэше `anime:null`,
 `loaded:false`; пустой Search использует `results:[]`. Feed имеет форму
@@ -56,7 +97,7 @@ Windows-клиент открывает pipe как byte stream с duplex-дос
 
 ## Snapshot и события
 
-`getAnime`, `getSearch`, `getFeed` немедленно отдают имеющийся snapshot. Если
+`subscribeAnime`, `subscribeSearch`, `subscribeFeed` немедленно отдают имеющийся snapshot. Если
 запись отсутствует или устарела, в фоне идёт API refresh. При успешном
 обновлении сервер отправляет вторую JSON-строку с тем же `id`:
 
@@ -73,6 +114,77 @@ Anime ошибка обновления тоже приходит как `anime.
 `anime:null`, `error` и `status`. Ошибка Feed/Search пока не вызывает событие
 клиенту; сервер пишет её в свой stderr. При `refreshing:false` нового события
 для этого запроса не ожидается.
+
+Если начальный ответ сообщает `refreshing:true`, клиент может отменить ожидание
+через `unsubscribeAnime`, `unsubscribeSearch` или `unsubscribeFeed`. В поле
+`target_id` передаётся `id` исходной subscribe-команды. Ответ отмены имеет свой
+`id`. Отмена прекращает доставку результата этому IPC-клиенту, но не прерывает
+общий API-запрос, который может быть нужен другим клиентам. При
+`refreshing:false` ожидание завершается сразу; закрытие соединения также
+прекращает доставку.
+
+История хранит до 1000 последних ID аниме. `subscribeHistory` принимает
+необязательные `offset` и `limit` (по умолчанию 0 и 20; `limit` ограничен
+диапазоном 1–50). Клиент получает только запрошенную страницу. Каждая запись
+`items` имеет форму `{anime_id, anime, save_data}`: карточка `anime` может быть
+`null`, а состояние просмотра в `save_data` независимо и тоже может быть `null`.
+Для карточек текущей страницы сервер использует данные из памяти; если карточка
+отсутствует или старше пяти минут, он запрашивает её через API Search по ID.
+Так за один раз обновляются только ID видимой страницы, а не вся история.
+Недавно проверенный, но не найденный API ID также кэшируется на пять минут.
+
+`addHistory` добавляет ID в начало списка; если он уже был, ID перемещается в
+начало. `removeHistory` удаляет ID. Сохранение состояния просмотра делается
+отдельными `updateAnimeSaveData` и `getAnimeSaveData`; поля `player`, `dubber`,
+`episode` и `time` не дублируются в записи списка истории. Подписчики получают
+новую полную страницу после изменения, а не локальную дельту:
+
+```json
+{"id":7,"ok":true,"event":"history.updated","revision":1,"sequence":1,"offset":0,"limit":20,"refreshing":false,"reason":"history","items":[{"anime_id":771,"anime":null,"save_data":null}]}
+```
+
+При дозагрузке карточек приходит ещё один snapshot страницы с причиной
+`metadata`. `sequence` увеличивается для каждого события конкретной подписки;
+используйте его для отбрасывания повторных или пришедших не по порядку событий.
+`revision` меняется при добавлении/удалении ID и при обновлении save data.
+Карточки могут обновиться без изменения `revision`, поэтому для событий нужен
+именно `sequence`.
+
+Подписка сохраняется до `unsubscribeHistory` или закрытия соединения. Новый
+`subscribeHistory` на том же соединении заменяет старую подписку. Изменения
+рассылаются только подписчикам, чьи страницы затронуты; при перестановке ID
+обновляются страницы, на которых изменился состав.
+
+`removeHistory` сообщает `removed:false`, если ID отсутствовал. Сохранённые
+данные просмотра можно читать независимо от нахождения ID в списке истории:
+
+```json
+{"id":11,"ok":true,"save_data":{"anime_id":771,"player":"Kodik","dubber":"Озвучка","episode":"1","time":312}}
+```
+
+Избранное — отдельная упорядоченная коллекция до 1000 ID. Повторный
+`addFavorite` перемещает ID в начало. `subscribeFavorites` работает так же,
+как `subscribeHistory`: возвращает одну страницу сразу и затем присылает
+`favorites.updated` при изменении страницы или загрузке карточек. Удаление
+отсутствующего ID возвращает `removed:false`. История и избранное сохраняются
+вместе, но имеют независимые revision и подписки.
+
+Состояния аниме `planned`, `watched`, `completed` и `dropped` — четыре
+независимо читаемые постраничные коллекции с тем же интерфейсом подписки.
+Добавление через любой `add...` автоматически удаляет этот ID из остальных
+трёх состояний и рассылает обновления каждой затронутой коллекции. Удаление
+через `remove...` меняет только указанное состояние. Все четыре списка
+сохраняются в `history.json` и ограничены 1000 ID каждый.
+`getStatus` возвращает `0` для аниме без статуса, `1` для planned, `2` для
+watched, `3` для completed и `5` для dropped. Код `4` не используется.
+`isFavourite`, `isfavorite` и `isfavourite` принимаются как синонимы
+`isFavorite`; `getstatus` принимается как синоним `getStatus`.
+
+```json
+{"id":24,"ok":true,"anime_id":771,"value":true}
+{"id":25,"ok":true,"anime_id":771,"status":2}
+{"id":26,"ok":true,"event":"watched.updated","revision":4,"sequence":2,"offset":0,"limit":20,"refreshing":false,"reason":"state","items":[]}
+```
 
 Кэш действует только в одном процессе сервера и имеет TTL пять минут. Частичные
 данные из Feed/Search могут появиться в `anime` раньше полной карточки. Данные

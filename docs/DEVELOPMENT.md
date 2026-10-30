@@ -56,8 +56,8 @@ test. В проекте нет настроенного CTest/GoogleTest suite. 
 | --- | --- | --- |
 | Новое API поле/модель | `src/api/models.def`, `src/api/json.hpp` | API справочник, `my_app`, IPC потребители при необходимости |
 | Новый API endpoint | `src/api/api.hpp`, `src/api/api.cpp` | `ApiError`, Core caller и integration check |
-| Кэш/TTL/coalescing | `src/core/core.hpp`, `src/core/core.cpp` | callbacks, mutex, API failure, CORE/CACHE docs |
-| Новый IPC method/поле | оба `ipc_server*.cpp`, `server.*` | protocol docs, Unix и Windows transport, клиенты |
+| Кэш/TTL/coalescing | `src/core/core.hpp`, `src/core/cache/`, `src/core/{anime_service,search_feed}.cpp` | callbacks, mutex, API failure, CORE/CACHE docs |
+| Новый IPC method/поле | `src/server/server.*`, `src/server/ipc/unix.cpp`, `src/server/ipc/windows.cpp` | protocol docs, оба transport-а, клиенты |
 | Новый player extractor | `video_extractor.hpp`, отдельный extractor, `video.cpp` registry | spoofed host cases, API и TUI video flow |
 | Экран/клавиши TUI | `tui/tui_app.cpp` | IPC response/event, resize/scroll, `tui/README.md` |
 | Clipboard | `tui/clipboard.*` | Wayland/X11 наличие утилиты и ошибка запуска |
@@ -66,7 +66,7 @@ test. В проекте нет настроенного CTest/GoogleTest suite. 
 
 1. Добавьте операцию на уровне API/Core/Server согласно ответственности.
 2. Обработайте метод и проверьте обязательные JSON поля в
-   `ipc_server.cpp` **и** `ipc_server_windows.cpp`.
+   `ipc/unix.cpp` **и** `ipc/windows.cpp`.
 3. Определите точный response shape, ID и поведение при API ошибке.
 4. Обновите `src/server/IPC.md`, `docs/SERVER.md` и README, если это пример,
    который должен знать каждый клиент.
@@ -92,13 +92,15 @@ Unix и Windows transports должны сохранять один wire format.
 
 ## Известные особенности текущей реализации
 
-- Кэш не персистентный и сбрасывается при перезапуске.
+- Кэш Anime/Search/Feed не персистентный и сбрасывается при перезапуске;
+  история, избранное, четыре статуса и позиция просмотра сохраняются через
+  `SaveManager` в `history.json` (формат версии 4).
 - TTL — пять минут; API и Kodik соединения могут завершиться сетевой ошибкой.
 - Search/Feed refresh failure сейчас логируется сервером, но клиент не получает
   отдельного error event.
 - Anime IPC преобразует `videos` в `players`; внешняя API модель при этом не
   меняется.
 - Только Kodik зарегистрирован в video extractor registry.
-- Wire protocol имеет версию 2. Если существующие сообщения станут
+- Wire protocol имеет версию 3. Если существующие сообщения станут
   несовместимы для клиента, синхронно измените `protocol` в `hello` на обоих
   transport-ах и обновите клиентскую проверку версии и документацию.

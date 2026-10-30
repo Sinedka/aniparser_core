@@ -1,7 +1,8 @@
 # Aniparser Core
 
 Сервер на C++23 получает данные аниме с `api.yani.tv`, держит последние
-ответы в памяти процесса и отдаёт их клиентам через IPC. Linux TUI — отдельный
+ответы в памяти процесса и отдаёт их клиентам через IPC. История, избранное,
+статусы просмотра и позиция серии сохраняются на диск. Linux TUI — отдельный
 клиент этого IPC. Чтобы подключить собственное приложение, достаточно читать
 и писать строки JSON через Unix-сокет; связывать клиент с библиотеками C++ или
 устройством внутреннего кэша не нужно.
@@ -66,14 +67,17 @@ Windows-клиент открывает его как duplex byte stream чер�
 {"id":1,"method":"hello"}
 ```
 
-Ответ версии 2:
+Ответ версии 3:
 
 ```json
-{"id":1,"ok":true,"protocol":2,"transport":"json-lines"}
+{"id":1,"ok":true,"protocol":3,"transport":"json-lines"}
 ```
 
 Если `ok` равен `false` или версия протокола неизвестна, клиенту следует
 показать ошибку и не отправлять остальные методы.
+В версии 3 методы потоковых Anime/Search/Feed/History/Favorites/статусов
+называются `subscribe...`; старые имена `getAnime`, `getSearch`, `getFeed` и
+`getHistory` больше не принимаются.
 
 ### Методы
 
@@ -82,16 +86,37 @@ Windows-клиент открывает его как duplex byte stream чер�
 | Метод | Дополнительные поля | Что приходит в ответе |
 | --- | --- | --- |
 | `hello` | — | `protocol`, `transport` |
-| `getFeed` | — | `feed`, `refreshing` |
-| `getSearch` | `params` — объект фильтров | `results`, `offset`, `limit`, `refreshing` |
-| `getAnime` | `anime_id` — положительное целое | `anime`, `refreshing`, `loaded` |
+| `subscribeFeed` | — | snapshot `feed`, затем `feed.updated` |
+| `subscribeSearch` | `params` — объект фильтров | snapshot `results`, затем `search.updated` |
+| `subscribeAnime` | `anime_id` — положительное целое | snapshot `anime`, затем `anime.updated` |
+| `unsubscribeAnime`, `unsubscribeSearch`, `unsubscribeFeed` | `target_id` исходной subscribe-команды | отменяют доставку её позднего обновления этому клиенту |
+| `subscribeHistory` | необязательные `offset`, `limit` (по умолчанию 0/20, максимум 50) | страница `items`, затем `history.updated` snapshots |
+| `unsubscribeHistory` | — | отменяет историю-подписку соединения |
+| `addHistory` | `anime_id` | добавленный ID и revision |
+| `removeHistory` | `anime_id` | флаг `removed` и revision |
+| `subscribeFavorites` / `unsubscribeFavorites` | `offset`, `limit` для subscribe | snapshots и `favorites.updated` |
+| `addFavorite` / `removeFavorite` | `anime_id` | добавить/удалить избранное |
+| `subscribePlanned`, `subscribeWatched`, `subscribeCompleted`, `subscribeDropped` | `offset`, `limit` | страницы статусов и `.updated` события |
+| `addPlanned`, `addWatched`, `addCompleted`, `addDropped` | `anime_id` | установить статус, убрав его из остальных |
+| `removePlanned`, `removeWatched`, `removeCompleted`, `removeDropped` | `anime_id` | удалить только указанный статус |
+| `isFavorite` | `anime_id` | boolean в `value`; также принимаются `isFavourite`, `isfavorite`, `isfavourite` |
+| `getStatus` | `anime_id` | код статуса в поле `status` |
+| `getAnimeSaveData` | `anime_id` | `save_data` либо `null` |
+| `updateAnimeSaveData` | `anime_id`, `player`, `dubber`, `episode`, `time` | сохранённые данные просмотра |
 | `getVideoOptions` | `iframe` — ссылка Kodik | `qualities`: список `{quality,url}` |
 | `getVideo` | `iframe`, необязательно `quality` | `url` |
+
+`getStatus` возвращает `0` без пользовательского статуса, `1` для planned,
+`2` для watched, `3` для completed и `5` для dropped (`4` зарезервирован).
+`getstatus` — alias `getStatus`.
+При добавлении через `addPlanned`/`addWatched`/`addCompleted`/`addDropped`
+аниме убирается из остальных трёх списков. Каждая подписка статуса и избранного
+постраничная, как `subscribeHistory`.
 
 Пример поиска:
 
 ```json
-{"id":2,"method":"getSearch","params":{"q":"магическая битва","offset":0,"limit":10}}
+{"id":2,"method":"subscribeSearch","params":{"q":"магическая битва","offset":0,"limit":10}}
 ```
 
 Из `params` можно передавать фильтры из `yani::SearchInput`; полный перечень
@@ -102,7 +127,7 @@ Windows-клиент открывает его как duplex byte stream чер�
 Пример получения аниме и разбора видеопотоков:
 
 ```json
-{"id":3,"method":"getAnime","anime_id":771}
+{"id":3,"method":"subscribeAnime","anime_id":771}
 {"id":4,"method":"getVideoOptions","iframe":"//kodikplayer.com/season/1/example/720p"}
 ```
 
@@ -139,7 +164,7 @@ Feed и Search, разбор Kodik выполняется прямо при об
 
 ### Кэш и два ответа на запрос
 
-`getFeed`, `getSearch` и `getAnime` сначала возвращают то, что уже есть в
+`subscribeFeed`, `subscribeSearch` и `subscribeAnime` сначала возвращают то, что уже есть в
 серверном кэше. Пустой кэш не блокирует клиента до ответа внешнего API: он
 получит пустой снимок (для Anime — `null`) и `refreshing: true`. После
 успешного запроса сервер отправит вторую строку-событие с тем же `id`:
@@ -155,7 +180,7 @@ Feed и Search, разбор Kodik выполняется прямо при об
 
 Кэш существует только внутри процесса сервера, очищается при его завершении и
 считается устаревшим через 5 минут. Успешные результаты поиска и feed также
-заполняют краткие сведения об аниме, чтобы `getAnime` мог сразу вернуть
+заполняют краткие сведения об аниме, чтобы `subscribeAnime` мог сразу вернуть
 частичный объект. После API-обновления приходит полный объект. При ошибке
 обновления сервер сохраняет последнюю успешную версию. Ошибка Anime приходит
 событием `anime.updated` с `ok:false` и `error`; ошибки Feed/Search сейчас
@@ -191,10 +216,10 @@ def receive():
 
 send({"id": 1, "method": "hello"})
 hello = receive()
-if not hello.get("ok") or hello.get("protocol") != 2:
+if not hello.get("ok") or hello.get("protocol") != 3:
     raise RuntimeError(f"Несовместимый IPC: {hello}")
 
-send({"id": 2, "method": "getAnime", "anime_id": 771})
+send({"id": 2, "method": "subscribeAnime", "anime_id": 771})
 snapshot = receive()
 print("snapshot:", json.dumps(snapshot, ensure_ascii=False, indent=2))
 
@@ -218,7 +243,12 @@ sock.close()
 ## Проект и документация
 
 - `src/api/` — HTTP-клиент, модели ответов API и извлекатель Kodik.
-- `src/core/` — процессный кэш и очередь фоновых API-задач.
+- `src/core/` — логика аниме, Search/Feed, коллекций пользователя и очередь
+  фоновых API-задач.
+- `src/core/cache/` — AnimeCache, общий список истории/избранного и SaveManager;
+  отдельная библиотека CMake `aniparser_cache`.
+- `src/server/ipc/` — платформенные реализации Unix socket и Windows pipe,
+  собранные отдельной CMake object-целью.
 - `src/server/` — фасад приложения и IPC-сервер.
 - `src/app/` — ручная интеграционная программа и автономные проверки моделей.
 - `tui/` — независимый Linux-клиент IPC на Notcurses.

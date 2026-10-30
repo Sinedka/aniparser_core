@@ -14,6 +14,7 @@ target_sources(api
         FILES
             api.hpp
             kodik.hpp
+            types.hpp
             video_extractor.hpp
 )
 
@@ -26,6 +27,4 @@ target_link_libraries(api
     PUBLIC
         nlohmann_json::nlohmann_json
         cpr::cpr
-        common
-        
 )

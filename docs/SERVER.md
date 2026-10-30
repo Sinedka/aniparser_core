@@ -4,8 +4,10 @@
 
 - `Server` (`server.hpp/.cpp`) — фасад над Core плюс video extractor calls.
 - `IpcServer` — transport и парсер JSON Lines.
-- `ipc_server.cpp` — Linux/Unix domain socket.
-- `ipc_server_windows.cpp` — Windows named pipe.
+- `ipc/unix.cpp` — Linux/Unix domain socket.
+- `ipc/windows.cpp` — Windows named pipe.
+- `ipc/CMakeLists.txt` выбирает один платформенный транспорт и собирает его
+  отдельной object-целью; реализация включается в библиотеку `server`.
 - `main.cpp` — создаёт Core → Server → IpcServer и ждёт SIGINT/SIGTERM.
 
 Клиент связывается с протоколом, а не с C++-типами: изменение JSON-формы
@@ -38,10 +40,23 @@ snapshot и событие обновления.
 
 | Метод | Поля | Синхронный ответ | Событие после обновления |
 | --- | --- | --- | --- |
-| `hello` | нет | `{ok:true, protocol:2, transport:"json-lines"}` | нет |
-| `getAnime` | `anime_id` | `anime`, `refreshing`, `loaded` | `anime.updated` |
-| `getSearch` | `params` | `results`, `offset`, `limit`, `refreshing` | `search.updated` |
-| `getFeed` | нет | `feed`, `refreshing` | `feed.updated` |
+| `hello` | нет | `{ok:true, protocol:3, transport:"json-lines"}` | нет |
+| `subscribeAnime` | `anime_id` | `anime`, `refreshing`, `loaded` | `anime.updated` |
+| `subscribeSearch` | `params` | `results`, `offset`, `limit`, `refreshing` | `search.updated` |
+| `subscribeFeed` | нет | `feed`, `refreshing` | `feed.updated` |
+| `unsubscribeAnime` / `unsubscribeSearch` / `unsubscribeFeed` | `target_id` subscribe request | `{unsubscribed}` | нет |
+| `subscribeHistory` | необязательные `offset`, `limit` (1–50) | страница `items`, `revision`, `sequence` | новые snapshots `history.updated` для этой страницы |
+| `unsubscribeHistory` | — | отменяет подписку этого соединения | нет |
+| `subscribeFavorites` | необязательные `offset`, `limit` (1–50) | страница `items`, `revision`, `sequence` | snapshots `favorites.updated` |
+| `unsubscribeFavorites` | — | отменяет подписку избранного этого соединения | нет |
+| `addHistory` / `removeHistory` | `anime_id` | результат операции и `revision` | обновление затронутых страниц |
+| `addFavorite` / `removeFavorite` | `anime_id` | результат операции и `revision` | обновление затронутых страниц |
+| `subscribePlanned` / `subscribeWatched` / `subscribeCompleted` / `subscribeDropped` | необязательные `offset`, `limit` | страница и `revision`, `sequence` | статусное `.updated` событие |
+| `add...` / `remove...` для каждого статуса | `anime_id` | результат операции и `revision` | обновление каждого затронутого статуса |
+| `isFavorite` | `anime_id` | bool в `value` (`isFavourite`, `isfavorite`, `isfavourite` — aliases) | нет |
+| `getStatus` | `anime_id` | int в `status` | нет |
+| `getAnimeSaveData` | `anime_id` | `save_data` или `null` | нет |
+| `updateAnimeSaveData` | поля прогресса | сохранённый `save_data` | обновление страницы, если ID в её составе |
 | `getVideoOptions` | `iframe` | `qualities: [{quality,url}, ...]` | нет |
 | `getVideo` | `iframe`, optional `quality` | `url` | нет |
 
@@ -49,6 +64,11 @@ snapshot и событие обновления.
 Anime отправляется как `null`, Search — с пустым `results`, Feed — с пустыми
 массивами/объектами модели. Поле `refreshing` показывает, выполняется ли
 обновление сейчас. Для Anime `loaded` говорит, есть ли вообще snapshot.
+
+`getStatus` возвращает `0` без пользовательского статуса, `1` для planned,
+`2` для watched, `3` для completed и `5` для dropped; значение `4` не
+используется. `getstatus` — alias. При добавлении в один статус аниме
+удаляется из остальных трёх.
 
 ### Ошибки
 
