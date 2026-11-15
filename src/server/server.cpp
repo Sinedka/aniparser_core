@@ -8,8 +8,9 @@
 #include "kodik.hpp"
 
 Server::AnimeSubscriptionId Server::subscribeAnime(std::int64_t anime_id,
-                                                   AnimeCallback callback) {
-  return core_.subscribeAnime(anime_id, std::move(callback), true);
+                                                   AnimeCallback callback,
+                                                   bool* refreshing) {
+  return core_.subscribeAnime(anime_id, std::move(callback), true, refreshing);
 }
 
 bool Server::unsubscribeAnime(AnimeSubscriptionId subscription_id) {
@@ -25,30 +26,40 @@ bool Server::animeIsLoaded(std::int64_t anime_id) const {
 }
 
 bool Server::subscribeSearch(yani::SearchInput params,
-                             SearchCallback callback) {
-  return core_.subscribeSearch(std::move(params), std::move(callback));
+                             SearchCallback callback,
+                             ErrorCallback on_error,
+                             bool* refreshing) {
+  return core_.subscribeSearch(std::move(params), std::move(callback),
+                               std::move(on_error), refreshing);
 }
 
 bool Server::searchPageNeedsRefresh(const yani::SearchInput &params) const {
   return core_.searchPageNeedsRefresh(params);
 }
 
-bool Server::subscribeFeed(FeedCallback callback) {
-  return core_.subscribeFeed(std::move(callback));
+bool Server::subscribeFeed(FeedCallback callback,
+                           ErrorCallback on_error,
+                           bool* refreshing) {
+  return core_.subscribeFeed(std::move(callback), std::move(on_error),
+                             refreshing);
 }
 
 bool Server::feedNeedsRefresh() const { return core_.feedNeedsRefresh(); }
 
-bool Server::addHistory(std::int64_t anime_id) {
+yani::Result<bool> Server::addHistory(std::int64_t anime_id) {
   return core_.addHistory(anime_id);
 }
 
-bool Server::removeHistory(std::int64_t anime_id) {
+yani::Result<bool> Server::removeHistory(std::int64_t anime_id) {
   return core_.removeHistory(anime_id);
 }
 
-bool Server::updateAnimeSaveData(Core::AnimeSaveData data) {
+yani::Result<bool> Server::updateAnimeSaveData(Core::AnimeSaveData data) {
   return core_.updateAnimeSaveData(std::move(data));
+}
+
+yani::Result<bool> Server::removeAnimeSaveData(std::int64_t id) {
+  return core_.removeAnimeSaveData(id);
 }
 
 std::optional<Core::AnimeSaveData>
@@ -79,11 +90,11 @@ void Server::cancelHistorySubscription(HistorySubscriptionId subscription_id) {
   core_.cancelHistorySubscription(subscription_id);
 }
 
-bool Server::addFavorite(std::int64_t anime_id) {
+yani::Result<bool> Server::addFavorite(std::int64_t anime_id) {
   return core_.addFavorite(anime_id);
 }
 
-bool Server::removeFavorite(std::int64_t anime_id) {
+yani::Result<bool> Server::removeFavorite(std::int64_t anime_id) {
   return core_.removeFavorite(anime_id);
 }
 
@@ -114,8 +125,10 @@ void Server::cancelFavoritesSubscription(HistorySubscriptionId id) {
 }
 
 #define DEFINE_ANIME_STATUS(Name)                                              \
-  bool Server::add##Name(std::int64_t id) { return core_.add##Name(id); }      \
-  bool Server::remove##Name(std::int64_t id) {                                 \
+  yani::Result<bool> Server::add##Name(std::int64_t id) {                      \
+    return core_.add##Name(id);                                                \
+  }                                                                            \
+  yani::Result<bool> Server::remove##Name(std::int64_t id) {                   \
     return core_.remove##Name(id);                                             \
   }                                                                            \
   bool Server::is##Name(std::int64_t id) const { return core_.is##Name(id); }  \
@@ -239,4 +252,8 @@ yani::Result<std::string> Server::getVideo(std::string_view iframe,
 yani::Result<std::vector<yani::VideoQuality>>
 Server::getVideoOptions(std::string_view iframe) {
   return yani::getVideoOptions(iframe);
+}
+
+yani::Result<nlohmann::json> Server::getAnilibriaVideos(std::int64_t anime_id) {
+  return yani::getAnilibriaVideos(anime_id);
 }

@@ -3,6 +3,8 @@
 #include <models.hpp>
 
 #include <charconv>
+#include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace yani {
@@ -20,7 +22,7 @@ template <> struct yani_null_value<std::string> {
 };
 
 template <> struct yani_null_value<std::int64_t> {
-  static std::int64_t get() { return 1LL << 63; }
+  static std::int64_t get() { return std::numeric_limits<std::int64_t>::min(); }
 };
 
 template <> struct yani_null_value<double> {
@@ -39,20 +41,40 @@ template <typename T> struct yani_null_value<std::vector<T>> {
 // from_json
 // ============================================================
 
-template <typename T> T yani_get(const nlohmann::json &j, const char *name) {
+template <typename T> T yani_get(const nlohmann::json &j, const char* name) {
   if (!j.contains(name) || j.at(name).is_null())
     return yani_null_value<T>::get();
 
   const auto &value = j.at(name);
   if constexpr (std::is_arithmetic_v<T> && !std::is_same_v<T, bool>) {
-    if (value.is_number()) return value.get<T>();
+    if (value.is_number()) {
+      const auto number = value.get<long double>();
+      if (!std::isfinite(number) ||
+          number < static_cast<long double>(std::numeric_limits<T>::lowest()) ||
+          number > static_cast<long double>(std::numeric_limits<T>::max()))
+        throw std::runtime_error("API numeric field out of range: " +
+                                 std::string(name));
+      if constexpr (std::is_integral_v<T>) {
+        // Use exclusive power-of-two bounds too: MSVC long double equals
+        // double and cannot exactly represent INT64_MAX.
+        const auto bound = std::ldexp(1.0L, std::numeric_limits<T>::digits);
+        if (number >= bound || std::trunc(number) != number)
+          throw std::runtime_error("API field must be an in-range integer: " +
+                                   std::string(name));
+      }
+      return static_cast<T>(number);
+    }
     if (value.is_string()) {
       const auto text = value.get<std::string>();
       T result{};
       const auto [end, error] =
           std::from_chars(text.data(), text.data() + text.size(), result);
-      if (error == std::errc{} && end == text.data() + text.size())
+      if (error == std::errc{} && end == text.data() + text.size()) {
+        if constexpr (std::is_floating_point_v<T>)
+          if (!std::isfinite(result))
+            throw std::runtime_error("Non-finite API number");
         return result;
+      }
       throw std::runtime_error("API field '" + std::string(name) +
                                "' contains an invalid numeric string");
     }
@@ -86,8 +108,8 @@ template <typename T> T yani_get(const nlohmann::json &j, const char *name) {
     return value.get<T>();
   } catch (const std::exception &e) {
     throw std::runtime_error("Invalid API field '" + std::string(name) +
-                             "' (JSON type " + value.type_name() +"): " +
-                             e.what());
+                             "' (JSON type " + value.type_name() +
+                             "): " + e.what());
   }
 }
 
@@ -97,7 +119,11 @@ template <typename T> T yani_get(const nlohmann::json &j, const char *name) {
   obj.name = yani_get<type>(j, json_name);
 
 #define YANI_MODEL(name, fields)                                               \
-  inline void from_json(const nlohmann::json &j, name &obj) { fields }
+  inline void from_json(const nlohmann::json &j, name &obj) {                  \
+    if (!j.is_object())                                                        \
+      throw std::runtime_error("API model must be an object: " #name);         \
+    fields                                                                     \
+  }
 
 #include "models.def"
 

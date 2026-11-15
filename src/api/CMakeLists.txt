@@ -6,6 +6,8 @@ add_library(api STATIC)
 target_sources(api
     PRIVATE
         api.cpp
+        aksor.cpp
+        anilibria.cpp
         kodik.cpp
         video.cpp
     PUBLIC
@@ -13,6 +15,7 @@ target_sources(api
         BASE_DIRS .
         FILES
             api.hpp
+            aksor.hpp
             kodik.hpp
             types.hpp
             video_extractor.hpp

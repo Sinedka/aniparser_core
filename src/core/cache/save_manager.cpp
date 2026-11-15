@@ -2,10 +2,14 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <system_error>
 #include <unordered_set>
 #include <utility>
@@ -13,9 +17,33 @@
 #if defined(_WIN32)
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 namespace {
+template <typename Call> class ScopeExit {
+  public:
+  explicit ScopeExit(Call call) : call_(std::move(call)) {}
+  ScopeExit(const ScopeExit &) = delete;
+  ScopeExit &operator=(const ScopeExit &) = delete;
+  ~ScopeExit() { call_(); }
+
+  private:
+  Call call_;
+};
+
+std::int64_t stored_integer(const nlohmann::json &value) {
+  if (!value.is_number_integer() ||
+      (value.is_number_unsigned() &&
+       value.get<std::uint64_t>() >
+           static_cast<std::uint64_t>(
+               std::numeric_limits<std::int64_t>::max())))
+    throw std::runtime_error("Invalid integer in storage");
+  return value.get<std::int64_t>();
+}
+
 std::filesystem::path environment_path(const char* name) {
   const auto* value = std::getenv(name);
   return value && *value ? std::filesystem::path(value)
@@ -60,43 +88,67 @@ std::filesystem::path SaveManager::resolveDataDirectory() {
 #endif
 }
 
-aniparser::PersistentState SaveManager::loadState() const {
-  if (data_directory_.empty()) return {};
+yani::Result<aniparser::PersistentState> SaveManager::loadState() const {
+  const auto fail =
+      [this](std::string message) -> yani::Result<aniparser::PersistentState> {
+    load_error_ = yani::ApiError{.message = std::move(message)};
+    return std::unexpected(*load_error_);
+  };
+  load_error_.reset();
+  if (data_directory_.empty()) return fail("No data directory configured");
   const auto file = data_directory_ / "history.json";
   std::ifstream input(file);
-  if (!input) return {};
+  if (!input) {
+    std::error_code error;
+    const bool exists = std::filesystem::exists(file, error);
+    if (!error && !exists) return aniparser::PersistentState{};
+    return fail("Cannot read storage: " + file.string());
+  }
 
   try {
     const auto document = nlohmann::json::parse(input);
-    const auto version = document.value("version", 0);
+    if (!document.is_object() || !document.contains("version") ||
+        !document["version"].is_number_integer() ||
+        (document["version"].is_number_unsigned() &&
+         document["version"].get<std::uint64_t>() > 4))
+      return fail("Invalid storage version");
+    const auto version = document["version"].get<std::int64_t>();
     if (!document.is_object() || (version < 1 || version > 4) ||
         !document.contains("history") || !document["history"].is_array()) {
       std::cerr << "[save manager] unsupported history file format: " << file
                 << '\n';
-      return {};
+      return fail("Unsupported or invalid storage format: " + file.string());
     }
+    for (const auto* key : {"favorites", "save_data"})
+      if (document.contains(key) && !document[key].is_array())
+        return fail(std::string("Invalid storage array: ") + key);
+    if (document.contains("anime_states") &&
+        !document["anime_states"].is_object())
+      return fail("Invalid anime_states storage object");
 
     aniparser::PersistentState state;
     std::unordered_set<std::int64_t> seen;
     for (const auto &item : document["history"]) {
       try {
         const auto anime_id = item.is_object()
-                                  ? item.at("anime_id").get<std::int64_t>()
-                                  : item.get<std::int64_t>();
-        if (anime_id <= 0 || !seen.insert(anime_id).second) continue;
+                                  ? stored_integer(item.at("anime_id"))
+                                  : stored_integer(item);
+        if (anime_id <= 0) return fail("Invalid history ID");
+        if (!seen.insert(anime_id).second) continue;
         state.history.push_back(anime_id);
-        if (version == 1) {
+        if (version == 1 && item.is_object()) {
           aniparser::AnimeSaveData saved{
               .anime_id = anime_id,
               .player = item.value("player", std::string{}),
               .dubber = item.value("dubber", std::string{}),
               .episode = {},
-              .time = item.value("time", std::int64_t{0})};
+              .time = (item.contains("time") ? stored_integer(item.at("time"))
+                                             : 0)};
           if (!saved.player.empty() && !saved.dubber.empty() && saved.time >= 0)
             state.save_data.push_back(std::move(saved));
         }
-      } catch (const nlohmann::json::exception &) {
-        // Ignore malformed entries while preserving the rest of the history.
+      } catch (const std::exception &error) {
+        return fail(std::string("Invalid history entry: ") + error.what());
       }
     }
     if (version >= 3 && document.contains("favorites") &&
@@ -104,10 +156,13 @@ aniparser::PersistentState SaveManager::loadState() const {
       std::unordered_set<std::int64_t> favorite_ids;
       for (const auto &item : document["favorites"]) {
         try {
-          const auto anime_id = item.get<std::int64_t>();
-          if (anime_id > 0 && favorite_ids.insert(anime_id).second)
+          const auto anime_id = stored_integer(item);
+          if (anime_id <= 0) return fail("Invalid favorite ID");
+          if (favorite_ids.insert(anime_id).second)
             state.favorites.push_back(anime_id);
-        } catch (const nlohmann::json::exception &) {}
+        } catch (const std::exception &error) {
+          return fail(std::string("Invalid favorite entry: ") + error.what());
+        }
       }
     }
     if (version >= 4 && document.contains("anime_states") &&
@@ -118,15 +173,18 @@ aniparser::PersistentState SaveManager::loadState() const {
            ++state_index) {
         const auto state_it =
             document["anime_states"].find(state_names[state_index]);
-        if (state_it == document["anime_states"].end() || !state_it->is_array())
-          continue;
+        if (state_it == document["anime_states"].end()) continue;
+        if (!state_it->is_array()) return fail("Invalid anime state array");
         std::unordered_set<std::int64_t> state_ids;
         for (const auto &item : *state_it) {
           try {
-            const auto anime_id = item.get<std::int64_t>();
-            if (anime_id > 0 && state_ids.insert(anime_id).second)
+            const auto anime_id = stored_integer(item);
+            if (anime_id <= 0) return fail("Invalid anime state ID");
+            if (state_ids.insert(anime_id).second)
               state.anime_states[state_index].push_back(anime_id);
-          } catch (const nlohmann::json::exception &) {}
+          } catch (const std::exception &error) {
+            return fail(std::string("Invalid anime state ID: ") + error.what());
+          }
         }
       }
     }
@@ -134,44 +192,45 @@ aniparser::PersistentState SaveManager::loadState() const {
         document["save_data"].is_array()) {
       std::unordered_set<std::int64_t> saved_ids;
       for (const auto &item : document["save_data"]) {
-        if (!item.is_object()) continue;
+        if (!item.is_object()) return fail("Invalid progress entry");
         try {
           aniparser::AnimeSaveData saved{
-              .anime_id = item.at("anime_id").get<std::int64_t>(),
+              .anime_id = stored_integer(item.at("anime_id")),
               .player = item.at("player").get<std::string>(),
               .dubber = item.at("dubber").get<std::string>(),
               .episode = item.value("episode", std::string{}),
-              .time = item.at("time").get<std::int64_t>()};
+              .time = stored_integer(item.at("time"))};
           if (saved.anime_id <= 0 || saved.time < 0 || saved.player.empty() ||
-              saved.dubber.empty() || !saved_ids.insert(saved.anime_id).second)
-            continue;
+              saved.dubber.empty())
+            return fail("Invalid progress values");
+          if (!saved_ids.insert(saved.anime_id).second) continue;
           state.save_data.push_back(std::move(saved));
-        } catch (const nlohmann::json::exception &) {}
+        } catch (const std::exception &error) {
+          return fail(std::string("Invalid progress entry: ") + error.what());
+        }
       }
     }
+    if (input.bad()) return fail("I/O error while reading storage");
     return state;
   } catch (const std::exception &error) {
     std::cerr << "[save manager] failed to read " << file << ": "
               << error.what() << '\n';
-    return {};
+    return fail(std::string("Cannot decode storage: ") + error.what());
   }
 }
 
-bool SaveManager::saveState(const aniparser::PersistentState &state) const {
-  if (data_directory_.empty()) return false;
-
+yani::Result<void>
+SaveManager::saveState(const aniparser::PersistentState &state) const {
+  if (load_error_) return std::unexpected(*load_error_);
+  const auto fail = [](std::string message,
+                       bool committed = false) -> yani::Result<void> {
+    return std::unexpected(yani::ApiError{.message = std::move(message),
+                                          .data = {{"committed", committed}}});
+  };
+  if (data_directory_.empty()) return fail("No data directory configured");
   std::error_code error;
   std::filesystem::create_directories(data_directory_, error);
-  if (error) {
-    std::cerr << "[save manager] cannot create " << data_directory_ << ": "
-              << error.message() << '\n';
-    return false;
-  }
-#if !defined(_WIN32)
-  std::filesystem::permissions(data_directory_,
-                               std::filesystem::perms::owner_all,
-                               std::filesystem::perm_options::replace, error);
-#endif
+  if (error) return fail("Cannot create storage directory: " + error.message());
 
   nlohmann::json items = nlohmann::json::array();
   for (const auto anime_id : state.history) items.push_back(anime_id);
@@ -200,51 +259,89 @@ bool SaveManager::saveState(const aniparser::PersistentState &state) const {
                                 {"anime_states", std::move(anime_states)},
                                 {"save_data", std::move(save_data)}};
   const auto destination = data_directory_ / "history.json";
-  auto temporary = destination;
-  temporary += ".tmp";
-
-  {
-    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-    if (!output) {
-      std::cerr << "[save manager] cannot open " << temporary
-                << " for writing\n";
-      return false;
-    }
-    output << document.dump(2) << '\n';
-    output.flush();
-    if (!output) {
-      std::cerr << "[save manager] failed to write " << temporary << '\n';
-      output.close();
-      std::filesystem::remove(temporary, error);
-      return false;
-    }
-  }
-
+  const auto bytes = document.dump(2) + '\n';
 #if defined(_WIN32)
+  auto temporary = destination;
+  temporary += L".tmp." + std::to_wstring(::GetCurrentProcessId()) + L"." +
+               std::to_wstring(::GetTickCount64());
+  auto handle = ::CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (handle == INVALID_HANDLE_VALUE)
+    return fail("Cannot create temporary storage file");
+  bool temporary_exists = true;
+  const ScopeExit cleanup([&] {
+    if (handle != INVALID_HANDLE_VALUE) ::CloseHandle(handle);
+    if (temporary_exists) ::DeleteFileW(temporary.c_str());
+  });
+  bool written = true;
+  std::size_t offset = 0;
+  while (offset < bytes.size()) {
+    DWORD count = 0;
+    const auto size = static_cast<DWORD>(
+        std::min<std::size_t>(bytes.size() - offset, MAXDWORD));
+    if (!::WriteFile(handle, bytes.data() + offset, size, &count, nullptr) ||
+        count == 0) {
+      written = false;
+      break;
+    }
+    offset += count;
+  }
+  written = written && ::FlushFileBuffers(handle);
+  const bool closed =
+      ::CloseHandle(std::exchange(handle, INVALID_HANDLE_VALUE));
+  if (!written || !closed) {
+    return fail("Cannot write or flush storage file");
+  }
   if (!::MoveFileExW(temporary.c_str(), destination.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-    std::cerr << "[save manager] cannot replace " << destination
-              << " (Windows error " << ::GetLastError() << ")\n";
-    std::filesystem::remove(temporary, error);
-    return false;
+    return fail("Cannot replace storage file");
   }
+  temporary_exists = false;
 #else
-  std::filesystem::permissions(temporary,
-                               std::filesystem::perms::owner_read |
-                                   std::filesystem::perms::owner_write,
-                               std::filesystem::perm_options::replace, error);
-  error.clear();
-  std::filesystem::rename(temporary, destination, error);
-  if (error) {
-    std::cerr << "[save manager] cannot replace " << destination << ": "
-              << error.message() << '\n';
-    std::filesystem::remove(temporary, error);
-    return false;
+  // Exclusive creation avoids following an existing .tmp symlink.
+  auto pattern = destination.string() + ".tmp.XXXXXX";
+  int fd = ::mkstemp(pattern.data());
+  if (fd < 0)
+    return fail("Cannot create temporary storage file: " +
+                std::string(std::strerror(errno)));
+  bool temporary_exists = true;
+  const ScopeExit cleanup([&] {
+    if (fd >= 0) ::close(fd);
+    if (temporary_exists) ::unlink(pattern.c_str());
+  });
+  const std::filesystem::path temporary(pattern);
+  bool written = true;
+  std::size_t offset = 0;
+  while (offset < bytes.size()) {
+    const auto count =
+        ::write(fd, bytes.data() + offset, bytes.size() - offset);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) {
+      written = false;
+      break;
+    }
+    offset += static_cast<std::size_t>(count);
   }
-  std::filesystem::permissions(destination,
-                               std::filesystem::perms::owner_read |
-                                   std::filesystem::perms::owner_write,
-                               std::filesystem::perm_options::replace, error);
+  if (written) {
+    int result;
+    do { result = ::fsync(fd); } while (result < 0 && errno == EINTR);
+    written = result == 0;
+  }
+  const bool closed = ::close(std::exchange(fd, -1)) == 0;
+  if (!written || !closed) { return fail("Cannot write or sync storage file"); }
+  std::filesystem::rename(temporary, destination, error);
+  if (error) { return fail("Cannot replace storage file: " + error.message()); }
+  temporary_exists = false;
+  const int directory =
+      ::open(data_directory_.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (directory < 0)
+    return fail("Storage replaced, but cannot open directory for sync", true);
+  const bool synced = ::fsync(directory) == 0;
+  const bool directory_closed = ::close(directory) == 0;
+  if (!synced || !directory_closed)
+    return fail(
+        "Storage replaced, but directory sync failed; durability uncertain",
+        true);
 #endif
-  return true;
+  return {};
 }

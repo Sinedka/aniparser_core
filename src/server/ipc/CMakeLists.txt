@@ -1,4 +1,5 @@
 add_library(server_ipc OBJECT)
+target_sources(server_ipc PRIVATE request_validation.hpp protocol.hpp)
 
 if(WIN32)
   target_sources(server_ipc PRIVATE windows.cpp)

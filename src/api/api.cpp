@@ -6,6 +6,7 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <type_traits>
@@ -116,23 +117,31 @@ request_async(std::string path, cpr::Parameters params, Convert convert) {
   try {
     [[maybe_unused]] auto request = cpr::GetCallback(
         [promise, convert = std::move(convert)](cpr::Response response) {
-          auto raw = parse_response(response);
-          if (!raw) {
-            promise->set_value(std::unexpected(raw.error()));
-            return;
-          }
+          nlohmann::json document;
           try {
-            promise->set_value(convert(*raw));
-          } catch (const std::exception &e) {
-            promise->set_value(std::unexpected(
-                ApiError{.status = static_cast<int>(response.status_code),
-                         .message = e.what(),
-                         .data = std::move(*raw)}));
+            auto raw = parse_response(response);
+            if (!raw) promise->set_value(std::unexpected(raw.error()));
+            else {
+              document = std::move(*raw);
+              promise->set_value(convert(document));
+            }
           } catch (...) {
-            promise->set_value(std::unexpected(
-                ApiError{.status = static_cast<int>(response.status_code),
-                         .message = "Unknown error while decoding API response",
-                         .data = std::move(*raw)}));
+            const auto failure = std::current_exception();
+            try {
+              try {
+                std::rethrow_exception(failure);
+              } catch (const std::exception &error) {
+                promise->set_value(std::unexpected(
+                    ApiError{.status = static_cast<int>(response.status_code),
+                             .message = error.what(),
+                             .data = std::move(document)}));
+              } catch (...) {
+                promise->set_value(std::unexpected(
+                    ApiError{.status = static_cast<int>(response.status_code),
+                             .message = "Unknown API callback exception",
+                             .data = std::move(document)}));
+              }
+            } catch (...) { promise->set_exception(failure); }
           }
         },
         cpr::Url{BASE_URL + path}, std::move(params),
@@ -144,6 +153,20 @@ request_async(std::string path, cpr::Parameters params, Convert convert) {
         ApiError{.status = 0, .message = e.what(), .data = {}}));
   }
   return future;
+}
+
+AnimeResult decode_anime(const nlohmann::json &raw) {
+  auto result = raw.at("response").get<AnimeResult>();
+  if (result.anime_id <= 0)
+    throw std::runtime_error("Anime response has no positive ID");
+  return result;
+}
+std::vector<SearchResult> decode_search(const nlohmann::json &raw) {
+  auto results = raw.at("response").get<std::vector<SearchResult>>();
+  for (const auto &result : results)
+    if (result.anime_id <= 0)
+      throw std::runtime_error("Search result has no positive ID");
+  return results;
 }
 
 cpr::Parameters search_parameters(const SearchInput &input) {
@@ -203,7 +226,7 @@ Result<AnimeResult> getAnime(std::string_view alias_or_id, bool need_videos) {
 
   try {
 
-    return response->at("response").get<AnimeResult>();
+    return decode_anime(*response);
 
   } catch (const std::exception &e) {
 
@@ -217,9 +240,8 @@ std::future<Result<AnimeResult>> getAnimeAsync(std::string alias_or_id,
   cpr::Parameters params;
   params.Add({"need_videos", need_videos ? "true" : "false"});
   return request_async<AnimeResult>(
-      "anime/" + alias_or_id, std::move(params), [](const nlohmann::json &raw) {
-        return raw.at("response").get<AnimeResult>();
-      });
+      "anime/" + alias_or_id, std::move(params),
+      [](const nlohmann::json &raw) { return decode_anime(raw); });
 }
 
 // ============================================================
@@ -233,7 +255,7 @@ Result<std::vector<SearchResult>> searchTitles(const SearchInput &input) {
 
   try {
 
-    return response->at("response").get<std::vector<SearchResult>>();
+    return decode_search(*response);
 
   } catch (const std::exception &e) {
 
@@ -245,9 +267,8 @@ Result<std::vector<SearchResult>> searchTitles(const SearchInput &input) {
 std::future<Result<std::vector<SearchResult>>>
 searchTitlesAsync(SearchInput input) {
   return request_async<std::vector<SearchResult>>(
-      "anime", search_parameters(input), [](const nlohmann::json &raw) {
-        return raw.at("response").get<std::vector<SearchResult>>();
-      });
+      "anime", search_parameters(input),
+      [](const nlohmann::json &raw) { return decode_search(raw); });
 }
 
 // ============================================================

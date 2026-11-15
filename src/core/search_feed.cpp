@@ -3,6 +3,7 @@
 #include <iostream>
 #include <utility>
 
+#include "callback_queue.hpp"
 #include "core.hpp"
 #include "json.hpp"
 
@@ -130,8 +131,29 @@ void Core::cache_feed_results_locked(const yani::FeedResponse &feed) {
   }
 }
 
-bool Core::subscribeSearch(yani::SearchInput params, SearchCallback callback) {
+bool Core::subscribeSearch(yani::SearchInput params,
+                           SearchCallback callback,
+                           ErrorCallback on_error,
+                           bool* refreshing) {
+  if (refreshing) *refreshing = false;
   if (!callback) return false;
+  const auto initial_callback = callback;
+  const auto delivery = std::make_shared<CallbackQueue>();
+  callback = [delivery, callback](yani::SearchInput page,
+                                  std::vector<yani::SearchResult> rows,
+                                  bool updated) {
+    delivery->post([callback, page = std::move(page), rows = std::move(rows),
+                    updated]() mutable {
+      callback(std::move(page), std::move(rows), updated);
+    });
+  };
+  if (on_error)
+    on_error = [delivery, on_error](yani::ApiError error) {
+      delivery->post([on_error, error = std::move(error)]() mutable {
+        on_error(std::move(error));
+      });
+    };
+
   const auto key = search_key(params);
   std::vector<yani::SearchResult> snapshot;
   bool start_update = false;
@@ -146,24 +168,28 @@ bool Core::subscribeSearch(yani::SearchInput params, SearchCallback callback) {
     const bool expired =
         it == searches_.end() || !complete_snapshot ||
         Clock::now() - it->second.refreshed_at > kRefreshInterval;
-    if (expired) {
-      search_callbacks_[key].push_back(callback);
+    if (refreshing) *refreshing = expired || search_updating_.contains(key);
+    if (expired || search_updating_.contains(key)) {
+      search_callbacks_[key].push_back({callback, on_error});
       if (!search_updating_.contains(key)) {
         search_updating_.insert(key);
         start_update = true;
       }
     }
   }
-  callback(params, snapshot, false);
+  delivery->initial(
+      [initial_callback, params, snapshot = std::move(snapshot)]() mutable {
+        initial_callback(params, std::move(snapshot), false);
+      });
   if (!start_update) return true;
   if (tasks_.submit([this, params = std::move(params), key]() mutable {
         auto response = safe_api_call<std::vector<yani::SearchResult>>(
-            [&] { return yani::searchTitles(params); });
+            [&] { return backend_.search(params); });
         if (!response)
           std::cerr << "[api error] getSearch: status="
                     << response.error().status
                     << " message=" << response.error().message << '\n';
-        std::vector<SearchCallback> callbacks;
+        std::vector<SearchObserver> callbacks;
         std::vector<yani::SearchResult> value;
         {
           std::lock_guard lock(mutex_);
@@ -201,6 +227,7 @@ bool Core::subscribeSearch(yani::SearchInput params, SearchCallback callback) {
               if (result.anime_id > 0) anime_ids.push_back(result.anime_id);
             anime_cache_.storeSearchResults(key, value);
             searches_[key] = SearchEntry{std::move(anime_ids), Clock::now()};
+            value = anime_cache_.searchResults(searches_.at(key).anime_ids);
           }
           if (const auto it = search_callbacks_.find(key);
               it != search_callbacks_.end()) {
@@ -208,17 +235,27 @@ bool Core::subscribeSearch(yani::SearchInput params, SearchCallback callback) {
             search_callbacks_.erase(it);
           }
         }
-        if (!response) return;
         for (auto &notify : callbacks) {
           try {
-            notify(params, value, true);
+            if (response) notify.value(params, value, true);
+            else if (notify.error) notify.error(response.error());
           } catch (...) {}
         }
       }))
     return true;
-  std::lock_guard lock(mutex_);
-  search_updating_.erase(key);
-  search_callbacks_.erase(key);
+  std::vector<SearchObserver> rejected;
+  {
+    std::lock_guard lock(mutex_);
+    search_updating_.erase(key);
+    rejected = std::move(search_callbacks_[key]);
+    search_callbacks_.erase(key);
+  }
+  for (auto &observer : rejected) {
+    try {
+      if (observer.error)
+        observer.error(yani::ApiError{.message = "API queue full or stopping"});
+    } catch (...) {}
+  }
   return false;
 }
 
@@ -231,8 +268,25 @@ bool Core::searchPageNeedsRefresh(const yani::SearchInput &params) const {
              it->second.anime_ids.size();
 }
 
-bool Core::subscribeFeed(FeedCallback callback) {
+bool Core::subscribeFeed(FeedCallback callback,
+                         ErrorCallback on_error,
+                         bool* refreshing) {
+  if (refreshing) *refreshing = false;
   if (!callback) return false;
+  const auto initial_callback = callback;
+  const auto delivery = std::make_shared<CallbackQueue>();
+  callback = [delivery, callback](yani::FeedResponse feed, bool updated) {
+    delivery->post([callback, feed = std::move(feed), updated]() mutable {
+      callback(std::move(feed), updated);
+    });
+  };
+  if (on_error)
+    on_error = [delivery, on_error](yani::ApiError error) {
+      delivery->post([on_error, error = std::move(error)]() mutable {
+        on_error(std::move(error));
+      });
+    };
+
   std::optional<yani::FeedResponse> snapshot;
   bool start_update = false;
   {
@@ -240,22 +294,26 @@ bool Core::subscribeFeed(FeedCallback callback) {
     snapshot = feed_;
     const bool expired =
         !feed_ || Clock::now() - feed_refreshed_at_ > kRefreshInterval;
-    if (feed_updating_) feed_callbacks_.push_back(callback);
+    if (refreshing) *refreshing = expired || feed_updating_;
+    if (feed_updating_) feed_callbacks_.push_back({callback, on_error});
     else if (expired) {
       feed_updating_ = true;
-      feed_callbacks_.push_back(callback);
+      feed_callbacks_.push_back({callback, on_error});
       start_update = true;
     }
   }
-  callback(snapshot.value_or(yani::FeedResponse{}), false);
+  delivery->initial(
+      [initial_callback, snapshot = std::move(snapshot)]() mutable {
+        initial_callback(snapshot.value_or(yani::FeedResponse{}), false);
+      });
   if (!start_update) return true;
   if (tasks_.submit([this] {
-        auto response =
-            safe_api_call<yani::FeedResponse>([] { return yani::getFeed(); });
+        auto response = safe_api_call<yani::FeedResponse>(
+            [this] { return backend_.feed(); });
         if (!response)
           std::cerr << "[api error] getFeed: status=" << response.error().status
                     << " message=" << response.error().message << '\n';
-        std::vector<FeedCallback> callbacks;
+        std::vector<FeedObserver> callbacks;
         std::optional<yani::FeedResponse> updated;
         {
           std::lock_guard lock(mutex_);
@@ -271,14 +329,24 @@ bool Core::subscribeFeed(FeedCallback callback) {
         }
         for (auto &notify : callbacks) {
           try {
-            if (updated) notify(*updated, true);
+            if (updated) notify.value(*updated, true);
+            else if (notify.error) notify.error(response.error());
           } catch (...) {}
         }
       }))
     return true;
-  std::lock_guard lock(mutex_);
-  feed_updating_ = false;
-  feed_callbacks_.clear();
+  std::vector<FeedObserver> rejected;
+  {
+    std::lock_guard lock(mutex_);
+    feed_updating_ = false;
+    rejected.swap(feed_callbacks_);
+  }
+  for (auto &observer : rejected) {
+    try {
+      if (observer.error)
+        observer.error(yani::ApiError{.message = "API queue full or stopping"});
+    } catch (...) {}
+  }
   return false;
 }
 

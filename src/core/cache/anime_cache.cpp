@@ -3,6 +3,8 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 
 #include "json.hpp"
 
@@ -11,7 +13,12 @@ bool has_value(const nlohmann::json &value) {
   if (value.is_null()) return false;
   if (value.is_string()) return !value.get_ref<const std::string &>().empty();
   if (value.is_array() || value.is_object()) return !value.empty();
-  if (value.is_number()) return value.get<double>() != 0.0;
+  if (value.is_number_integer() &&
+      value.get<std::int64_t>() == std::numeric_limits<std::int64_t>::min())
+    return false;
+  if (value.is_number_float() && value.get<double>() == -1.0) return false;
+  if (value.is_number())
+    return std::isfinite(value.get<double>()) && value.get<double>() != 0.0;
   return true;
 }
 
@@ -57,7 +64,8 @@ AnimeCache::SubscribeResult AnimeCache::subscribe(std::int64_t anime_id,
 
   if (entry->value.anime_id != 0) result.anime = entry->value;
   const auto now = Clock::now();
-  const bool expired = entry->refreshed_at == Clock::time_point{} ||
+  const bool expired = !entry->has_full_details ||
+                       entry->refreshed_at == Clock::time_point{} ||
                        now - entry->refreshed_at > kRefreshInterval;
   if (callback && (expired || entry->updating)) {
     ++next_subscription_id_;
@@ -89,7 +97,7 @@ bool AnimeCache::unsubscribe(SubscriptionId subscription_id) {
 
 bool AnimeCache::needsFullRefresh(std::int64_t anime_id) const {
   const auto found = entries_.find(anime_id);
-  return found == entries_.end() ||
+  return found == entries_.end() || !found->second->has_full_details ||
          found->second->refreshed_at == Clock::time_point{} ||
          Clock::now() - found->second->refreshed_at > kRefreshInterval;
 }
@@ -140,7 +148,7 @@ void AnimeCache::storeSearchResults(
     checked_ids_.erase(result.anime_id);
     auto* entry = findOrCreate(result.anime_id);
     if (!entry) continue;
-    if (!entry->has_full_details) {
+    {
       yani::AnimeResult partial;
       partial.anime_id = result.anime_id;
       partial.anime_status = result.anime_status;
@@ -171,7 +179,7 @@ void AnimeCache::mergePartial(std::int64_t anime_id,
   auto* entry = findOrCreate(anime_id);
   if (!entry) return;
   checked_ids_.erase(anime_id);
-  if (!entry->has_full_details) merge(entry->value, partial);
+  merge(entry->value, partial);
   entry->card_refreshed_at = Clock::now();
   queueIfUnused(anime_id, *entry);
 }

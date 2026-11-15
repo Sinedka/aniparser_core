@@ -16,6 +16,7 @@ class Server {
   using AnimeCallback = Core::AnimeCallback;
   using AnimeSubscriptionId = Core::AnimeSubscriptionId;
   using SearchCallback = Core::SearchCallback;
+  using ErrorCallback = Core::ErrorCallback;
   using FeedCallback = Core::FeedCallback;
   using HistoryCallback = Core::HistoryCallback;
   using HistorySubscriptionId = Core::HistorySubscriptionId;
@@ -24,19 +25,26 @@ class Server {
   explicit Server(Core &core) : core_(core) {}
 
   AnimeSubscriptionId subscribeAnime(std::int64_t anime_id,
-                                     AnimeCallback callback);
+                                     AnimeCallback callback,
+                                     bool* refreshing = nullptr);
   bool unsubscribeAnime(AnimeSubscriptionId subscription_id);
   bool animeNeedsRefresh(std::int64_t anime_id) const;
   bool animeIsLoaded(std::int64_t anime_id) const;
 
-  bool subscribeSearch(yani::SearchInput params, SearchCallback callback);
+  bool subscribeSearch(yani::SearchInput params,
+                       SearchCallback callback,
+                       ErrorCallback on_error = {},
+                       bool* refreshing = nullptr);
   bool searchPageNeedsRefresh(const yani::SearchInput &params) const;
-  bool subscribeFeed(FeedCallback callback);
+  bool subscribeFeed(FeedCallback callback,
+                     ErrorCallback on_error = {},
+                     bool* refreshing = nullptr);
   bool feedNeedsRefresh() const;
 
-  bool addHistory(std::int64_t anime_id);
-  bool removeHistory(std::int64_t anime_id);
-  bool updateAnimeSaveData(Core::AnimeSaveData data);
+  yani::Result<bool> addHistory(std::int64_t anime_id);
+  yani::Result<bool> removeHistory(std::int64_t anime_id);
+  yani::Result<bool> updateAnimeSaveData(Core::AnimeSaveData data);
+  yani::Result<bool> removeAnimeSaveData(std::int64_t anime_id);
   std::optional<Core::AnimeSaveData>
   getAnimeSaveData(std::int64_t anime_id) const;
   std::vector<Core::HistoryEntry> getHistory() const;
@@ -48,8 +56,8 @@ class Server {
                                          std::size_t limit = 20);
   void cancelHistorySubscription(HistorySubscriptionId subscription_id);
 
-  bool addFavorite(std::int64_t anime_id);
-  bool removeFavorite(std::int64_t anime_id);
+  yani::Result<bool> addFavorite(std::int64_t anime_id);
+  yani::Result<bool> removeFavorite(std::int64_t anime_id);
   bool isFavorite(std::int64_t anime_id) const;
   int getStatus(std::int64_t anime_id) const;
   HistorySnapshot getFavoritesSnapshot(std::size_t offset = 0,
@@ -61,8 +69,8 @@ class Server {
   void cancelFavoritesSubscription(HistorySubscriptionId subscription_id);
 
 #define DECLARE_ANIME_STATUS(Name)                                             \
-  bool add##Name(std::int64_t anime_id);                                       \
-  bool remove##Name(std::int64_t anime_id);                                    \
+  yani::Result<bool> add##Name(std::int64_t anime_id);                         \
+  yani::Result<bool> remove##Name(std::int64_t anime_id);                      \
   bool is##Name(std::int64_t anime_id) const;                                  \
   HistorySnapshot get##Name##Snapshot(std::size_t offset = 0,                  \
                                       std::size_t limit = 20) const;           \
@@ -86,6 +94,7 @@ class Server {
                                      std::string_view quality = "720");
   yani::Result<std::vector<yani::VideoQuality>>
   getVideoOptions(std::string_view iframe);
+  yani::Result<nlohmann::json> getAnilibriaVideos(std::int64_t anime_id);
 
   private:
   Core &core_;

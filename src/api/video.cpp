@@ -1,6 +1,7 @@
 #include <array>
 #include <span>
 
+#include "aksor.hpp"
 #include "kodik.hpp"
 #include "video_extractor.hpp"
 
@@ -9,7 +10,8 @@ namespace {
 
 std::span<const VideoExtractor* const> extractors() noexcept {
   static const KodikVideoExtractor kodik;
-  static const std::array<const VideoExtractor*, 1> registry{&kodik};
+  static const AksorVideoExtractor aksor;
+  static const std::array<const VideoExtractor*, 2> registry{&kodik, &aksor};
   return registry;
 }
 

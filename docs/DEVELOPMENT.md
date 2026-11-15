@@ -55,7 +55,7 @@ test. В проекте нет настроенного CTest/GoogleTest suite. 
 | Изменение | Начните здесь | После изменения проверьте |
 | --- | --- | --- |
 | Новое API поле/модель | `src/api/models.def`, `src/api/json.hpp` | API справочник, `my_app`, IPC потребители при необходимости |
-| Новый API endpoint | `src/api/api.hpp`, `src/api/api.cpp` | `ApiError`, Core caller и integration check |
+| Новый API endpoint | `src/api/api.hpp`, `src/api/api.cpp` или отдельный provider source | `ApiError`, caller, protocol/client docs и сборка |
 | Кэш/TTL/coalescing | `src/core/core.hpp`, `src/core/cache/`, `src/core/{anime_service,search_feed}.cpp` | callbacks, mutex, API failure, CORE/CACHE docs |
 | Новый IPC method/поле | `src/server/server.*`, `src/server/ipc/unix.cpp`, `src/server/ipc/windows.cpp` | protocol docs, оба transport-а, клиенты |
 | Новый player extractor | `video_extractor.hpp`, отдельный extractor, `video.cpp` registry | spoofed host cases, API и TUI video flow |
@@ -96,11 +96,34 @@ Unix и Windows transports должны сохранять один wire format.
   история, избранное, четыре статуса и позиция просмотра сохраняются через
   `SaveManager` в `history.json` (формат версии 4).
 - TTL — пять минут; API и Kodik соединения могут завершиться сетевой ошибкой.
-- Search/Feed refresh failure сейчас логируется сервером, но клиент не получает
-  отдельного error event.
+- Search/Feed refresh failure логируется и завершает ожидание событиями
+  `search.updated`/`feed.updated` с `ok:false`, `error`, `status`.
 - Anime IPC преобразует `videos` в `players`; внешняя API модель при этом не
   меняется.
-- Только Kodik зарегистрирован в video extractor registry.
+- Kodik и Aksor зарегистрированы в video extractor registry. AniLibria вызывается
+  отдельно через `getAnilibriaVideos(anime_id)`: метод читает alias из Anime-данных
+  и возвращает эпизоды с доступными HLS-ссылками. TUI показывает AniLibria как
+  дополнительный источник рядом с iframe-плеерами.
 - Wire protocol имеет версию 3. Если существующие сообщения станут
   несовместимы для клиента, синхронно измените `protocol` в `hello` на обоих
   transport-ах и обновите клиентскую проверку версии и документацию.
+
+## Регрессионные проверки после аудита
+
+```sh
+out/Debug/src/app/aniparser_checks
+python3 tests/ipc_regression.py
+```
+
+Первый executable проверяет кэш, транзакции, версии сохранений, лимит прогресса,
+callbacks, очередь и UTF-8 без сети. Второй тест запускает fixture server и
+обычный сервер с disposable data paths; ему нужны локальные Unix sockets.
+На Linux дополнительно запускается `tui_client_checks` (deadline, cancellation,
+framing, EOF), без Notcurses/backend linkage. Все artifacts сохраняются в out/.
+Для ручного UI без внешнего API: `aniparser_checks --fixture-server ENDPOINT`.
+Этот режим тестового executable не является production provider.
+
+Полный TUI smoke: `python3 tests/tui_smoke.py` (настоящий Notcurses на PTY,
+mock IPC, cold success/error, UTF-8, навигация и resize). Для instrumented
+сборки используйте `--build out/Sanitize --sanitizers`; signal stack settings
+и пределы анализа описаны в docs/audit/REMEDIATION_STATUS.md.

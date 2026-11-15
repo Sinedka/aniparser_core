@@ -61,6 +61,7 @@ Windows-клиент открывает pipe как byte stream с duplex-дос
 {"id":23,"method":"subscribeDropped","offset":0,"limit":20}
 {"id":24,"method":"isFavorite","anime_id":771}
 {"id":25,"method":"getStatus","anime_id":771}
+{"id":26,"method":"getAnilibriaVideos","anime_id":771}
 ```
 
 ### Ответы
@@ -88,6 +89,7 @@ Windows-клиент открывает pipe как byte stream с duplex-дос
 | `removePlanned`, `removeWatched`, `removeCompleted`, `removeDropped` | `anime_id`, `removed` и revision |
 | `isFavorite` | `anime_id`; ответ содержит boolean `value` |
 | `getStatus` | `anime_id`; ответ содержит integer `status` |
+| `getAnilibriaVideos` | `anime_id`; массив `episodes` с доступными `qualities` |
 | `getAnimeSaveData` | `save_data` (объект или `null`) |
 | `updateAnimeSaveData` | сохранённый `save_data` и `revision` |
 
@@ -111,8 +113,9 @@ Windows-клиент открывает pipe как byte stream с duplex-дос
 прочитанный первоначальный ответ. Маршрутизируйте сообщения по ID.
 
 Anime ошибка обновления тоже приходит как `anime.updated`, с `ok:false`,
-`anime:null`, `error` и `status`. Ошибка Feed/Search пока не вызывает событие
-клиенту; сервер пишет её в свой stderr. При `refreshing:false` нового события
+`anime:null`, `error` и `status`. Ошибка Feed/Search также приходит событием
+`feed.updated`/`search.updated` с `ok:false`, `error`, `status`,
+`refreshing:false`; ожидание этого запроса завершается. При `refreshing:false` нового события
 для этого запроса не ожидается.
 
 Если начальный ответ сообщает `refreshing:true`, клиент может отменить ожидание
@@ -200,10 +203,24 @@ watched, `3` для completed и `5` для dropped. Код `4` не испол�
 ```
 
 В группы входят только iframe плееров, которые поддержаны backend extractor.
-Сейчас это Kodik. Episode URL — это iframe, а не прямая ссылка видео. Запрос
+Сейчас поддержаны Kodik и Aksor. Episode URL — это iframe, а не прямая ссылка видео. Запрос
 `getVideoOptions` превращает iframe в доступные прямые потоки; разрешения —
 строки, например `"720"`. Видеопарсер вызывается синхронно в обработчике
-клиента; ответ может задержаться на время HTTP-запросов к Kodik.
+клиента; ответ может задержаться на время HTTP-запроса к соответствующему
+плееру.
+
+`getAnilibriaVideos` берёт alias из Anime-метаданных yani.tv и получает релиз
+AniLibria по alias. Ответ содержит `episodes` по возрастанию `ordinal`; у каждой
+серии есть массив `qualities` с доступными `{quality,url}` (`fhd`, `hd`, `sd`).
+Отсутствующие ссылки пропускаются. Ошибка возвращается как `ok:false`, `error`
+и HTTP `status` (ноль для сетевой ошибки). Запрос синхронный и может выполнить
+запрос к yani.tv, затем к основному и резервному хостам AniLibria. Этот источник
+не добавляется в `anime.players`: TUI показывает AniLibria отдельно, если alias
+присутствует в `anime.remote_ids`. Например:
+
+```json
+{"id":26,"ok":true,"episodes":[{"ordinal":1,"name":"Эпизод 1","qualities":[{"quality":"fhd","url":"https://...m3u8"},{"quality":"hd","url":"https://...m3u8"}]}]}
+```
 
 ## Соединение и завершение
 
@@ -214,3 +231,35 @@ watched, `3` для completed и `5` для dropped. Код `4` не испол�
 
 Сервер пишет команды и IPC-ошибки в терминал. Уровень логирования и формат
 терминального вывода не являются частью wire protocol.
+
+## Уточнения надёжности без изменения версии 3
+
+- `id` обязателен: неотрицательное целое int64 или строка до 128 байт.
+  ID активных запросов следует делать уникальными в пределах соединения.
+  Повторный активный stream с той же парой method/id отклоняется;
+  максимум 256 ожидающих Anime/Search/Feed streams на соединение.
+- ID аниме — строго положительное целое int64; дробные значения, переполнения,
+  отрицательные offset/time и limit < 1 отклоняются до мутации. Положительный
+  limit коллекции по-прежнему ограничивается 50. Search limit — 1–50;
+  фильтры массивов — до 1000 элементов, q/sort — до 4096 байт.
+- Ошибка Search/Feed завершает ожидание `*.updated` с `ok:false`, `error`,
+  `status`, `refreshing:false`. Для ошибок metadata snapshot содержит
+  `reason:"error"`, `ok:false`, `refreshing:false` и прежнюю страницу.
+- `removeAnimeSaveData` принимает `anime_id`, возвращает `removed` и удаляет
+  только прогресс, без изменения членства в истории/избранном/статусах.
+- Прогресс: максимум 10 000 новых ID. При заполнении новые ID отклоняются;
+  обновление/удаление существующих разрешено. Данные при загрузке не отсекаются.
+  Player/dubber — до 4096 байт, episode — до 256, time — целое >= 0.
+- При ошибке сохранения возвращается `ok:false`, а не подтверждение прогресса.
+  Ошибки до замены файла не меняют память и revisions. Если файл заменён, но
+  fsync каталога не удался, `data.committed:true` сообщает, что состояние уже
+  изменилось, а долговременная сохранность не подтверждена.
+- Повреждённое/неподдерживаемое хранилище блокирует запись до восстановления
+  файла и перезапуска. Оригинал не перезаписывается пустыми списками.
+- Сервер ограничивает активные соединения 128 и прерывает зависшую отправку
+  примерно через пять секунд. Завершённые соединения/threads освобождаются во
+  время работы. Активный внешний HTTP может задержать shutdown до своего timeout.
+
+Это additive error/validation уточнения: формат успешных ответов и handshake
+остаются совместимыми с корректными клиентами версии 3. C++ mutation API теперь
+возвращает `Result<bool>`; это изменение C++ интерфейса, не JSON wire format.

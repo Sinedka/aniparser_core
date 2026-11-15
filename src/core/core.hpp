@@ -31,14 +31,13 @@ class TaskPool {
   TaskPool &operator=(const TaskPool &) = delete;
 
   bool submit(std::function<void()> task);
-  void shutdown();
+  void shutdown(bool discard_pending = false);
 
   private:
   void worker_loop();
   const std::size_t queue_limit_;
   std::mutex mutex_;
   std::condition_variable condition_;
-  std::condition_variable space_available_;
   std::deque<std::function<void()>> queue_;
   std::vector<std::thread> workers_;
   bool stopping_ = false;
@@ -57,9 +56,11 @@ class Core {
   using AnimeSubscriptionId = AnimeCache::SubscriptionId;
   using SearchCallback = std::function<void(
       yani::SearchInput, std::vector<yani::SearchResult>, bool updated)>;
+  using ErrorCallback = std::function<void(yani::ApiError)>;
   using FeedCallback = std::function<void(yani::FeedResponse, bool updated)>;
   using HistorySubscriptionId = std::uint64_t;
   static constexpr std::size_t kHistoryLimit = 1000;
+  static constexpr std::size_t kSaveDataLimit = 10000;
   static constexpr std::size_t kHistoryPageLimit = 50;
   struct HistoryItem {
     std::int64_t anime_id = 0;
@@ -72,30 +73,49 @@ class Core {
     std::uint64_t sequence = 0;
     bool refreshing = false;
     std::string update_reason;
+    std::optional<yani::ApiError> error;
   };
   using HistoryCallback = std::function<void(HistorySnapshot, bool updated)>;
 
+  struct ApiBackend {
+    std::function<yani::Result<yani::AnimeResult>(std::int64_t, bool)> anime =
+        [](std::int64_t id, bool videos) {
+          return yani::getAnime(std::to_string(id), videos);
+        };
+    std::function<yani::Result<std::vector<yani::SearchResult>>(
+        const yani::SearchInput &)>
+        search = yani::searchTitles;
+    std::function<yani::Result<yani::FeedResponse>()> feed = yani::getFeed;
+  };
   Core();
+  explicit Core(ApiBackend backend);
   ~Core();
   Core(const Core &) = delete;
   Core &operator=(const Core &) = delete;
 
   AnimeSubscriptionId subscribeAnime(std::int64_t anime_id,
                                      AnimeCallback callback,
-                                     bool need_videos = true);
+                                     bool need_videos = true,
+                                     bool* refreshing = nullptr);
   bool unsubscribeAnime(AnimeSubscriptionId subscription_id);
   bool animeNeedsRefresh(std::int64_t anime_id) const;
   bool animeIsLoaded(std::int64_t anime_id) const;
 
-  bool subscribeSearch(yani::SearchInput params, SearchCallback callback);
+  bool subscribeSearch(yani::SearchInput params,
+                       SearchCallback callback,
+                       ErrorCallback on_error = {},
+                       bool* refreshing = nullptr);
   bool searchPageNeedsRefresh(const yani::SearchInput &params) const;
 
-  bool subscribeFeed(FeedCallback callback);
+  bool subscribeFeed(FeedCallback callback,
+                     ErrorCallback on_error = {},
+                     bool* refreshing = nullptr);
   bool feedNeedsRefresh() const;
 
-  bool addHistory(std::int64_t anime_id);
-  bool removeHistory(std::int64_t anime_id);
-  bool updateAnimeSaveData(AnimeSaveData data);
+  yani::Result<bool> addHistory(std::int64_t anime_id);
+  yani::Result<bool> removeHistory(std::int64_t anime_id);
+  yani::Result<bool> updateAnimeSaveData(AnimeSaveData data);
+  yani::Result<bool> removeAnimeSaveData(std::int64_t anime_id);
   std::optional<AnimeSaveData> getAnimeSaveData(std::int64_t anime_id) const;
   std::vector<HistoryEntry> getHistory() const;
   HistorySnapshot getHistorySnapshot(std::size_t offset = 0,
@@ -106,8 +126,8 @@ class Core {
                                          std::size_t limit = 20);
   void cancelHistorySubscription(HistorySubscriptionId subscription_id);
 
-  bool addFavorite(std::int64_t anime_id);
-  bool removeFavorite(std::int64_t anime_id);
+  yani::Result<bool> addFavorite(std::int64_t anime_id);
+  yani::Result<bool> removeFavorite(std::int64_t anime_id);
   bool isFavorite(std::int64_t anime_id) const;
   HistorySnapshot getFavoritesSnapshot(std::size_t offset = 0,
                                        std::size_t limit = 20) const;
@@ -117,8 +137,8 @@ class Core {
                                            std::size_t limit = 20);
   void cancelFavoritesSubscription(HistorySubscriptionId subscription_id);
 
-  bool addPlanned(std::int64_t anime_id);
-  bool removePlanned(std::int64_t anime_id);
+  yani::Result<bool> addPlanned(std::int64_t anime_id);
+  yani::Result<bool> removePlanned(std::int64_t anime_id);
   bool isPlanned(std::int64_t anime_id) const;
   HistorySnapshot getPlannedSnapshot(std::size_t offset = 0,
                                      std::size_t limit = 20) const;
@@ -128,8 +148,8 @@ class Core {
                                          std::size_t limit = 20);
   void cancelPlannedSubscription(HistorySubscriptionId subscription_id);
 
-  bool addWatched(std::int64_t anime_id);
-  bool removeWatched(std::int64_t anime_id);
+  yani::Result<bool> addWatched(std::int64_t anime_id);
+  yani::Result<bool> removeWatched(std::int64_t anime_id);
   bool isWatched(std::int64_t anime_id) const;
   HistorySnapshot getWatchedSnapshot(std::size_t offset = 0,
                                      std::size_t limit = 20) const;
@@ -139,8 +159,8 @@ class Core {
                                          std::size_t limit = 20);
   void cancelWatchedSubscription(HistorySubscriptionId subscription_id);
 
-  bool addCompleted(std::int64_t anime_id);
-  bool removeCompleted(std::int64_t anime_id);
+  yani::Result<bool> addCompleted(std::int64_t anime_id);
+  yani::Result<bool> removeCompleted(std::int64_t anime_id);
   bool isCompleted(std::int64_t anime_id) const;
   HistorySnapshot getCompletedSnapshot(std::size_t offset = 0,
                                        std::size_t limit = 20) const;
@@ -150,8 +170,8 @@ class Core {
                                            std::size_t limit = 20);
   void cancelCompletedSubscription(HistorySubscriptionId subscription_id);
 
-  bool addDropped(std::int64_t anime_id);
-  bool removeDropped(std::int64_t anime_id);
+  yani::Result<bool> addDropped(std::int64_t anime_id);
+  yani::Result<bool> removeDropped(std::int64_t anime_id);
   bool isDropped(std::int64_t anime_id) const;
   int getStatus(std::int64_t anime_id) const;
   HistorySnapshot getDroppedSnapshot(std::size_t offset = 0,
@@ -194,14 +214,18 @@ class Core {
                                                        std::size_t limit) const;
   void
   notify_history_subscribers(std::string reason,
-                             const std::vector<std::int64_t> &anime_ids = {});
+                             const std::vector<std::int64_t> &anime_ids = {},
+                             std::optional<yani::ApiError> error = {});
   void refresh_history_metadata(std::vector<std::int64_t> anime_ids);
   void
   notify_favorites_subscribers(std::string reason,
-                               const std::vector<std::int64_t> &anime_ids = {});
+                               const std::vector<std::int64_t> &anime_ids = {},
+                               std::optional<yani::ApiError> error = {});
   void refresh_favorites_metadata(std::vector<std::int64_t> anime_ids);
-  bool add_anime_status(AnimeStatus status, std::int64_t anime_id);
-  bool remove_anime_status(AnimeStatus status, std::int64_t anime_id);
+  yani::Result<bool> add_anime_status(AnimeStatus status,
+                                      std::int64_t anime_id);
+  yani::Result<bool> remove_anime_status(AnimeStatus status,
+                                         std::int64_t anime_id);
   bool is_anime_status(AnimeStatus status, std::int64_t anime_id) const;
   HistorySnapshot anime_status_page_locked(AnimeStatus status,
                                            std::size_t offset,
@@ -217,26 +241,41 @@ class Core {
   void notify_anime_status_subscribers(
       AnimeStatus status,
       std::string reason,
-      const std::vector<std::int64_t> &anime_ids = {});
+      const std::vector<std::int64_t> &anime_ids = {},
+      std::optional<yani::ApiError> error = {});
   void refresh_anime_status_metadata(AnimeStatus status,
                                      std::vector<std::int64_t> anime_ids);
   void cancel_anime_status_subscription(AnimeStatus status,
                                         HistorySubscriptionId id);
+  yani::Result<bool>
+  change_state(std::function<bool(aniparser::PersistentState &)> change);
+  void drain_notifications();
   aniparser::PersistentState persistent_state_locked() const;
   void cache_feed_results_locked(const yani::FeedResponse &feed);
+  ApiBackend backend_;
   TaskPool tasks_{4, 128};
   mutable std::mutex mutex_;
   AnimeCache anime_cache_;
   std::unordered_map<std::string, SearchEntry> searches_;
-  std::unordered_map<std::string, std::vector<SearchCallback>>
+  struct SearchObserver {
+    SearchCallback value;
+    ErrorCallback error;
+  };
+  struct FeedObserver {
+    FeedCallback value;
+    ErrorCallback error;
+  };
+  std::unordered_map<std::string, std::vector<SearchObserver>>
       search_callbacks_;
   std::unordered_set<std::string> search_updating_;
   std::optional<yani::FeedResponse> feed_;
   Clock::time_point feed_refreshed_at_{};
   bool feed_updating_ = false;
-  std::vector<FeedCallback> feed_callbacks_;
+  std::vector<FeedObserver> feed_callbacks_;
   SaveManager save_manager_;
   std::mutex collection_save_mutex_;
+  std::deque<std::function<void()>> notifications_;
+  bool dispatching_notifications_ = false;
   HistoryCollection history_;
   FavoritesCollection favorites_;
   std::array<AnimeStatusCollection, 4> anime_states_;

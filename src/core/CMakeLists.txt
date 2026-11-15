@@ -6,13 +6,14 @@ add_library(core STATIC
     anime_service.cpp
     search_feed.cpp
     history.cpp
+    collection_changes.cpp
 )
 
 target_sources(core
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS .
-        FILES core.hpp
+        FILES core.hpp callback_queue.hpp
 )
 
 target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

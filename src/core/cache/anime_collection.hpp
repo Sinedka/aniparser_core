@@ -11,6 +11,14 @@ class AnimeCollection {
   public:
   using Id = std::int64_t;
 
+  AnimeCollection() = default;
+  AnimeCollection(const AnimeCollection &) = delete;
+  AnimeCollection &operator=(const AnimeCollection &) = delete;
+  void swap(AnimeCollection &other) noexcept {
+    ids_.swap(other.ids_);
+    index_.swap(other.index_);
+  }
+
   bool add(Id anime_id, std::size_t limit);
   bool remove(Id anime_id);
   bool contains(Id anime_id) const;

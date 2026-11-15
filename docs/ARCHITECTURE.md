@@ -22,6 +22,7 @@
                                                            │ HTTP
                                                 ┌──────────▼───────────┐
                                                 │ API yani.tv / Kodik  │
+                                                │ AniLibria            │
                                                 └──────────────────────┘
 ```
 
@@ -29,7 +30,7 @@
 
 | Путь | Что в нём находится |
 | --- | --- |
-| `src/api/` | HTTP-клиент, JSON-модели сайта, Kodik extractor и реестр video extractors. |
+| `src/api/` | HTTP-клиент, JSON-модели сайта, Kodik/Aksor extractors и клиент AniLibria. |
 | `src/api/types.hpp` | Типы запросов API, включая `SearchInput`; отдельной `common`-цели нет. |
 | `src/core/` | Anime, Search/Feed, история/избранное/статусы и пул фоновых задач. |
 | `src/core/cache/` | AnimeCache, общий `AnimeCollection`, модели состояния и SaveManager; CMake-цель `aniparser_cache`. |
@@ -84,6 +85,13 @@ players[] → dubbers[] → episodes[]
 Это преобразование относится к IPC-сериализации; API-модель в `src/api/`
 остаётся с полем `videos`.
 
+AniLibria загружается отдельным IPC-методом `getAnilibriaVideos(anime_id)`:
+TUI не смешивает его серии с `players` из Anime JSON. При построении списка
+источников оно добавляет AniLibria, если в Anime есть
+`remote_ids.anilibria_alias`; после выбора запрашивает прямые HLS-ссылки всех
+серий и показывает доступные качества для копирования. Сам AniLibria-вызов
+синхронно обращается к API и не использует Anime-кэш Core.
+
 ## Почему кэш находится в Core
 
 Core централизует конкурентный доступ, TTL и объединение сведений из поиска и
@@ -91,3 +99,11 @@ feed. Server не хранит копию кэша и не передаёт кл
 получает snapshot, а при обновлении заменяет или объединяет его локально.
 
 Подробнее см. [Core](CORE.md), [кэш](CACHE.md) и [IPC](../src/server/IPC.md).
+
+После исправлений аудита JSON dispatcher общий для обоих транспортов:
+`src/server/ipc/protocol.hpp`; validation — `request_validation.hpp`. Платформенные
+cpp содержат владение, I/O cancellation и lifecycle соединений.
+`collection_changes.cpp` реализует подготовку и commit сохранений, а
+`callback_queue.hpp` гарантирует initial snapshot перед completion callbacks.
+TUI хранит owning navigation frames, включая модель и вложенные меню; возврат
+не переносит старые индексы на данные другого аниме.

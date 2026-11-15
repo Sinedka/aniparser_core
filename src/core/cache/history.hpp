@@ -12,6 +12,7 @@ struct AnimeSaveData {
   std::string dubber;
   std::string episode;
   std::int64_t time = 0;
+  bool operator==(const AnimeSaveData &) const = default;
 };
 
 struct PersistentState {

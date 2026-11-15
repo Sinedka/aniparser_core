@@ -2,68 +2,57 @@
 #include <iostream>
 #include <utility>
 
+#include "callback_queue.hpp"
 #include "core.hpp"
 
-bool Core::addHistory(std::int64_t anime_id) {
-  if (anime_id <= 0) return false;
-  std::unique_lock save_lock(collection_save_mutex_);
-  {
-    std::lock_guard lock(mutex_);
-    history_.add(anime_id, kHistoryLimit);
-    ++history_revision_;
-  }
-  aniparser::PersistentState state;
-  {
-    std::lock_guard lock(mutex_);
-    state = persistent_state_locked();
-  }
-  if (!save_manager_.saveState(state))
-    std::cerr << "[core] failed to persist collections\n";
-  notify_history_subscribers("history");
+namespace {
+bool add_id(std::vector<std::int64_t> &ids, std::int64_t id) {
+  if (id <= 0) return false;
+  std::erase(ids, id);
+  ids.insert(ids.begin(), id);
+  if (ids.size() > Core::kHistoryLimit) ids.resize(Core::kHistoryLimit);
   return true;
 }
-
-bool Core::removeHistory(std::int64_t anime_id) {
-  if (anime_id <= 0) return false;
-  std::unique_lock save_lock(collection_save_mutex_);
-  {
-    std::lock_guard lock(mutex_);
-    if (!history_.remove(anime_id)) return false;
-    ++history_revision_;
-  }
-  aniparser::PersistentState state;
-  {
-    std::lock_guard lock(mutex_);
-    state = persistent_state_locked();
-  }
-  if (!save_manager_.saveState(state))
-    std::cerr << "[core] failed to persist collections\n";
-  notify_history_subscribers("history");
-  return true;
+bool remove_id(std::vector<std::int64_t> &ids, std::int64_t id) {
+  return id > 0 && std::erase(ids, id) != 0;
 }
+} // namespace
 
-bool Core::updateAnimeSaveData(AnimeSaveData data) {
+yani::Result<bool> Core::addHistory(std::int64_t id) {
+  return change_state([id](auto &state) { return add_id(state.history, id); });
+}
+yani::Result<bool> Core::removeHistory(std::int64_t id) {
+  return change_state(
+      [id](auto &state) { return remove_id(state.history, id); });
+}
+yani::Result<bool> Core::updateAnimeSaveData(AnimeSaveData data) {
   if (data.anime_id <= 0 || data.player.empty() || data.dubber.empty() ||
-      data.episode.empty() || data.time < 0)
-    return false;
-  const auto anime_id = data.anime_id;
-  std::unique_lock save_lock(collection_save_mutex_);
-  bool in_history = false;
-  {
-    std::lock_guard lock(mutex_);
-    anime_save_data_.insert_or_assign(anime_id, std::move(data));
-    in_history = history_.contains(anime_id);
-    if (in_history) ++history_revision_;
-  }
-  aniparser::PersistentState state;
-  {
-    std::lock_guard lock(mutex_);
-    state = persistent_state_locked();
-  }
-  const bool saved = save_manager_.saveState(state);
-  if (!saved) std::cerr << "[core] failed to persist anime save data\n";
-  if (in_history) notify_history_subscribers("save_data", {anime_id});
-  return true;
+      data.episode.empty() || data.time < 0 || data.player.size() > 4096 ||
+      data.dubber.size() > 4096 || data.episode.size() > 256)
+    return std::unexpected(
+        yani::ApiError{.message = "Invalid anime save data"});
+  // The limit is checked under the transaction lock, including concurrent
+  // inserts.
+  return change_state([data = std::move(data)](auto &state) {
+    const auto found = std::find_if(
+        state.save_data.begin(), state.save_data.end(),
+        [&](const auto &item) { return item.anime_id == data.anime_id; });
+    if (found != state.save_data.end()) *found = data;
+    else {
+      if (state.save_data.size() >= kSaveDataLimit)
+        throw std::length_error(
+            "Save data limit reached (10000); remove an entry first");
+      state.save_data.push_back(data);
+    }
+    return true;
+  });
+}
+yani::Result<bool> Core::removeAnimeSaveData(std::int64_t id) {
+  return change_state([id](auto &state) {
+    return id > 0 && std::erase_if(state.save_data, [id](const auto &entry) {
+                       return entry.anime_id == id;
+                     }) != 0;
+  });
 }
 
 std::optional<Core::AnimeSaveData>
@@ -146,6 +135,14 @@ Core::HistorySubscriptionId Core::subscribeHistory(HistoryCallback callback,
                                                    std::size_t offset,
                                                    std::size_t limit) {
   if (!callback) return 0;
+  const auto initial_callback = callback;
+  const auto delivery = std::make_shared<CallbackQueue>();
+  callback = [delivery, callback](HistorySnapshot snapshot, bool updated) {
+    delivery->post(
+        [callback, snapshot = std::move(snapshot), updated]() mutable {
+          callback(std::move(snapshot), updated);
+        });
+  };
   limit = std::clamp<std::size_t>(limit, 1, kHistoryPageLimit);
   HistorySubscriptionId subscription_id;
   HistorySnapshot snapshot;
@@ -164,13 +161,18 @@ Core::HistorySubscriptionId Core::subscribeHistory(HistoryCallback callback,
         subscription_id,
         HistorySubscription{offset, limit, 0, std::move(anime_ids), callback});
   }
-  callback(std::move(snapshot), false);
+  delivery->initial(
+      [initial_callback, snapshot = std::move(snapshot)]() mutable {
+        initial_callback(std::move(snapshot), false);
+      });
   refresh_history_metadata(std::move(stale_ids));
   return subscription_id;
 }
 
 void Core::notify_history_subscribers(
-    std::string reason, const std::vector<std::int64_t> &anime_ids) {
+    std::string reason,
+    const std::vector<std::int64_t> &anime_ids,
+    std::optional<yani::ApiError> error) {
   std::unordered_set<std::int64_t> affected(anime_ids.begin(), anime_ids.end());
   std::vector<std::pair<HistoryCallback, HistorySnapshot>> notifications;
   std::unordered_set<std::int64_t> stale_ids;
@@ -196,17 +198,25 @@ void Core::notify_history_subscribers(
       subscription.anime_ids = std::move(anime_ids);
       const auto stale =
           stale_history_ids_locked(subscription.offset, subscription.limit);
-      stale_ids.insert(stale.begin(), stale.end());
+      if (!error) stale_ids.insert(stale.begin(), stale.end());
+      if (error) {
+        snapshot.error = error;
+        snapshot.refreshing = false;
+      }
       notifications.emplace_back(subscription.callback, std::move(snapshot));
     }
+    notifications_.push_back(
+        [this, notifications = std::move(notifications),
+         ids = std::vector<std::int64_t>(stale_ids.begin(),
+                                         stale_ids.end())]() mutable {
+          for (auto &[callback, snapshot] : notifications) {
+            try {
+              callback(std::move(snapshot), true);
+            } catch (...) {}
+          }
+          refresh_history_metadata(std::move(ids));
+        });
   }
-  for (auto &[callback, snapshot] : notifications) {
-    try {
-      callback(std::move(snapshot), true);
-    } catch (...) {}
-  }
-  refresh_history_metadata(
-      std::vector<std::int64_t>(stale_ids.begin(), stale_ids.end()));
 }
 
 void Core::refresh_history_metadata(std::vector<std::int64_t> anime_ids) {
@@ -222,22 +232,26 @@ void Core::refresh_history_metadata(std::vector<std::int64_t> anime_ids) {
     yani::SearchInput params;
     params.ids = batch;
     params.limit = static_cast<std::int64_t>(batch.size());
-    subscribeSearch(std::move(params),
-                    [this, batch = std::move(batch)](
-                        yani::SearchInput,
-                        std::vector<yani::SearchResult> results, bool updated) {
-                      if (!updated) return;
-                      std::unordered_set<std::int64_t> returned;
-                      for (const auto &result : results)
-                        returned.insert(result.anime_id);
-                      {
-                        std::lock_guard lock(mutex_);
-                        for (const auto anime_id : batch)
-                          if (!returned.contains(anime_id))
-                            anime_cache_.markCardChecked(anime_id);
-                      }
-                      notify_history_subscribers("metadata", batch);
-                    });
+    subscribeSearch(
+        std::move(params),
+        [this, batch](yani::SearchInput,
+                      std::vector<yani::SearchResult> results, bool updated) {
+          if (!updated) return;
+          std::unordered_set<std::int64_t> returned;
+          for (const auto &result : results) returned.insert(result.anime_id);
+          {
+            std::lock_guard lock(mutex_);
+            for (const auto anime_id : batch)
+              if (!returned.contains(anime_id))
+                anime_cache_.markCardChecked(anime_id);
+          }
+          notify_history_subscribers("metadata", batch);
+          drain_notifications();
+        },
+        [this, batch](yani::ApiError error) {
+          notify_history_subscribers("error", batch, std::move(error));
+          drain_notifications();
+        });
   }
 }
 
@@ -247,42 +261,13 @@ void Core::cancelHistorySubscription(HistorySubscriptionId subscription_id) {
   history_callbacks_.erase(subscription_id);
 }
 
-bool Core::addFavorite(std::int64_t anime_id) {
-  if (anime_id <= 0) return false;
-  std::unique_lock save_lock(collection_save_mutex_);
-  {
-    std::lock_guard lock(mutex_);
-    favorites_.add(anime_id, kHistoryLimit);
-    ++favorites_revision_;
-  }
-  aniparser::PersistentState state;
-  {
-    std::lock_guard lock(mutex_);
-    state = persistent_state_locked();
-  }
-  if (!save_manager_.saveState(state))
-    std::cerr << "[core] failed to persist collections\n";
-  notify_favorites_subscribers("favorites");
-  return true;
+yani::Result<bool> Core::addFavorite(std::int64_t id) {
+  return change_state(
+      [id](auto &state) { return add_id(state.favorites, id); });
 }
-
-bool Core::removeFavorite(std::int64_t anime_id) {
-  if (anime_id <= 0) return false;
-  std::unique_lock save_lock(collection_save_mutex_);
-  {
-    std::lock_guard lock(mutex_);
-    if (!favorites_.remove(anime_id)) return false;
-    ++favorites_revision_;
-  }
-  aniparser::PersistentState state;
-  {
-    std::lock_guard lock(mutex_);
-    state = persistent_state_locked();
-  }
-  if (!save_manager_.saveState(state))
-    std::cerr << "[core] failed to persist collections\n";
-  notify_favorites_subscribers("favorites");
-  return true;
+yani::Result<bool> Core::removeFavorite(std::int64_t id) {
+  return change_state(
+      [id](auto &state) { return remove_id(state.favorites, id); });
 }
 
 bool Core::isFavorite(std::int64_t anime_id) const {
@@ -339,6 +324,14 @@ Core::HistorySubscriptionId Core::subscribeFavorites(HistoryCallback callback,
                                                      std::size_t offset,
                                                      std::size_t limit) {
   if (!callback) return 0;
+  const auto initial_callback = callback;
+  const auto delivery = std::make_shared<CallbackQueue>();
+  callback = [delivery, callback](HistorySnapshot snapshot, bool updated) {
+    delivery->post(
+        [callback, snapshot = std::move(snapshot), updated]() mutable {
+          callback(std::move(snapshot), updated);
+        });
+  };
   limit = std::clamp<std::size_t>(limit, 1, kHistoryPageLimit);
   HistorySubscriptionId subscription_id;
   HistorySnapshot snapshot;
@@ -358,13 +351,18 @@ Core::HistorySubscriptionId Core::subscribeFavorites(HistoryCallback callback,
         subscription_id,
         HistorySubscription{offset, limit, 0, std::move(anime_ids), callback});
   }
-  callback(std::move(snapshot), false);
+  delivery->initial(
+      [initial_callback, snapshot = std::move(snapshot)]() mutable {
+        initial_callback(std::move(snapshot), false);
+      });
   refresh_favorites_metadata(std::move(stale_ids));
   return subscription_id;
 }
 
 void Core::notify_favorites_subscribers(
-    std::string reason, const std::vector<std::int64_t> &anime_ids) {
+    std::string reason,
+    const std::vector<std::int64_t> &anime_ids,
+    std::optional<yani::ApiError> error) {
   std::unordered_set<std::int64_t> affected(anime_ids.begin(), anime_ids.end());
   std::vector<std::pair<HistoryCallback, HistorySnapshot>> notifications;
   std::unordered_set<std::int64_t> stale_ids;
@@ -389,17 +387,25 @@ void Core::notify_favorites_subscribers(
       subscription.anime_ids = std::move(page_ids);
       const auto stale =
           stale_favorites_ids_locked(subscription.offset, subscription.limit);
-      stale_ids.insert(stale.begin(), stale.end());
+      if (!error) stale_ids.insert(stale.begin(), stale.end());
+      if (error) {
+        snapshot.error = error;
+        snapshot.refreshing = false;
+      }
       notifications.emplace_back(subscription.callback, std::move(snapshot));
     }
+    notifications_.push_back(
+        [this, notifications = std::move(notifications),
+         ids = std::vector<std::int64_t>(stale_ids.begin(),
+                                         stale_ids.end())]() mutable {
+          for (auto &[callback, snapshot] : notifications) {
+            try {
+              callback(std::move(snapshot), true);
+            } catch (...) {}
+          }
+          refresh_favorites_metadata(std::move(ids));
+        });
   }
-  for (auto &[callback, snapshot] : notifications) {
-    try {
-      callback(std::move(snapshot), true);
-    } catch (...) {}
-  }
-  refresh_favorites_metadata(
-      std::vector<std::int64_t>(stale_ids.begin(), stale_ids.end()));
 }
 
 void Core::refresh_favorites_metadata(std::vector<std::int64_t> anime_ids) {
@@ -415,22 +421,26 @@ void Core::refresh_favorites_metadata(std::vector<std::int64_t> anime_ids) {
     yani::SearchInput params;
     params.ids = batch;
     params.limit = static_cast<std::int64_t>(batch.size());
-    subscribeSearch(std::move(params),
-                    [this, batch = std::move(batch)](
-                        yani::SearchInput,
-                        std::vector<yani::SearchResult> results, bool updated) {
-                      if (!updated) return;
-                      std::unordered_set<std::int64_t> returned;
-                      for (const auto &result : results)
-                        returned.insert(result.anime_id);
-                      {
-                        std::lock_guard lock(mutex_);
-                        for (const auto anime_id : batch)
-                          if (!returned.contains(anime_id))
-                            anime_cache_.markCardChecked(anime_id);
-                      }
-                      notify_favorites_subscribers("metadata", batch);
-                    });
+    subscribeSearch(
+        std::move(params),
+        [this, batch](yani::SearchInput,
+                      std::vector<yani::SearchResult> results, bool updated) {
+          if (!updated) return;
+          std::unordered_set<std::int64_t> returned;
+          for (const auto &result : results) returned.insert(result.anime_id);
+          {
+            std::lock_guard lock(mutex_);
+            for (const auto anime_id : batch)
+              if (!returned.contains(anime_id))
+                anime_cache_.markCardChecked(anime_id);
+          }
+          notify_favorites_subscribers("metadata", batch);
+          drain_notifications();
+        },
+        [this, batch](yani::ApiError error) {
+          notify_favorites_subscribers("error", batch, std::move(error));
+          drain_notifications();
+        });
   }
 }
 
@@ -440,54 +450,21 @@ void Core::cancelFavoritesSubscription(HistorySubscriptionId subscription_id) {
   favorites_callbacks_.erase(subscription_id);
 }
 
-bool Core::add_anime_status(AnimeStatus status, std::int64_t anime_id) {
-  if (anime_id <= 0) return false;
+yani::Result<bool> Core::add_anime_status(AnimeStatus status, std::int64_t id) {
   const auto destination = static_cast<std::size_t>(status);
-  if (destination >= anime_states_.size()) return false;
-  std::unique_lock save_lock(collection_save_mutex_);
-  std::vector<AnimeStatus> changed{status};
-  {
-    std::lock_guard lock(mutex_);
-    anime_states_[destination].add(anime_id, kHistoryLimit);
-    ++anime_status_revisions_[destination];
-    for (std::size_t index = 0; index < anime_states_.size(); ++index) {
-      if (index == destination || !anime_states_[index].remove(anime_id))
-        continue;
-      ++anime_status_revisions_[index];
-      changed.push_back(static_cast<AnimeStatus>(index));
-    }
-  }
-  aniparser::PersistentState state;
-  {
-    std::lock_guard lock(mutex_);
-    state = persistent_state_locked();
-  }
-  if (!save_manager_.saveState(state))
-    std::cerr << "[core] failed to persist anime states\n";
-  for (const auto changed_status : changed)
-    notify_anime_status_subscribers(changed_status, "state");
-  return true;
+  if (destination >= anime_states_.size() || id <= 0) return false;
+  return change_state([id, destination](auto &state) {
+    for (auto &ids : state.anime_states) std::erase(ids, id);
+    return add_id(state.anime_states[destination], id);
+  });
 }
-
-bool Core::remove_anime_status(AnimeStatus status, std::int64_t anime_id) {
-  if (anime_id <= 0) return false;
+yani::Result<bool> Core::remove_anime_status(AnimeStatus status,
+                                             std::int64_t id) {
   const auto index = static_cast<std::size_t>(status);
   if (index >= anime_states_.size()) return false;
-  std::unique_lock save_lock(collection_save_mutex_);
-  {
-    std::lock_guard lock(mutex_);
-    if (!anime_states_[index].remove(anime_id)) return false;
-    ++anime_status_revisions_[index];
-  }
-  aniparser::PersistentState state;
-  {
-    std::lock_guard lock(mutex_);
-    state = persistent_state_locked();
-  }
-  if (!save_manager_.saveState(state))
-    std::cerr << "[core] failed to persist anime states\n";
-  notify_anime_status_subscribers(status, "state");
-  return true;
+  return change_state([id, index](auto &state) {
+    return remove_id(state.anime_states[index], id);
+  });
 }
 
 bool Core::is_anime_status(AnimeStatus status, std::int64_t anime_id) const {
@@ -559,6 +536,14 @@ Core::subscribe_anime_status(AnimeStatus status,
                              std::size_t limit) {
   const auto index = static_cast<std::size_t>(status);
   if (index >= anime_states_.size() || !callback) return 0;
+  const auto initial_callback = callback;
+  const auto delivery = std::make_shared<CallbackQueue>();
+  callback = [delivery, callback](HistorySnapshot snapshot, bool updated) {
+    delivery->post(
+        [callback, snapshot = std::move(snapshot), updated]() mutable {
+          callback(std::move(snapshot), updated);
+        });
+  };
   limit = std::clamp<std::size_t>(limit, 1, kHistoryPageLimit);
   HistorySubscriptionId id;
   HistorySnapshot snapshot;
@@ -575,7 +560,10 @@ Core::subscribe_anime_status(AnimeStatus status,
     anime_status_callbacks_[index].emplace(
         id, HistorySubscription{offset, limit, 0, std::move(ids), callback});
   }
-  callback(std::move(snapshot), false);
+  delivery->initial(
+      [initial_callback, snapshot = std::move(snapshot)]() mutable {
+        initial_callback(std::move(snapshot), false);
+      });
   refresh_anime_status_metadata(status, std::move(stale));
   return id;
 }
@@ -583,7 +571,8 @@ Core::subscribe_anime_status(AnimeStatus status,
 void Core::notify_anime_status_subscribers(
     AnimeStatus status,
     std::string reason,
-    const std::vector<std::int64_t> &anime_ids) {
+    const std::vector<std::int64_t> &anime_ids,
+    std::optional<yani::ApiError> error) {
   const auto index = static_cast<std::size_t>(status);
   if (index >= anime_states_.size()) return;
   std::unordered_set<std::int64_t> affected(anime_ids.begin(), anime_ids.end());
@@ -610,17 +599,25 @@ void Core::notify_anime_status_subscribers(
       subscription.anime_ids = std::move(page_ids);
       const auto page_stale = stale_anime_status_ids_locked(
           status, subscription.offset, subscription.limit);
-      stale.insert(page_stale.begin(), page_stale.end());
+      if (!error) stale.insert(page_stale.begin(), page_stale.end());
+      if (error) {
+        snapshot.error = error;
+        snapshot.refreshing = false;
+      }
       notifications.emplace_back(subscription.callback, std::move(snapshot));
     }
+    notifications_.push_back(
+        [this, status, notifications = std::move(notifications),
+         ids =
+             std::vector<std::int64_t>(stale.begin(), stale.end())]() mutable {
+          for (auto &[callback, snapshot] : notifications) {
+            try {
+              callback(std::move(snapshot), true);
+            } catch (...) {}
+          }
+          refresh_anime_status_metadata(status, std::move(ids));
+        });
   }
-  for (auto &[callback, snapshot] : notifications) {
-    try {
-      callback(std::move(snapshot), true);
-    } catch (...) {}
-  }
-  refresh_anime_status_metadata(
-      status, std::vector<std::int64_t>(stale.begin(), stale.end()));
 }
 
 void Core::refresh_anime_status_metadata(AnimeStatus status,
@@ -633,23 +630,28 @@ void Core::refresh_anime_status_metadata(AnimeStatus status,
     yani::SearchInput params;
     params.ids = batch;
     params.limit = static_cast<std::int64_t>(batch.size());
-    subscribeSearch(std::move(params),
-                    [this, status, batch = std::move(batch)](
-                        yani::SearchInput,
-                        std::vector<yani::SearchResult> results, bool updated) {
-                      if (!updated) return;
-                      std::unordered_set<std::int64_t> returned;
-                      for (const auto &result : results)
-                        returned.insert(result.anime_id);
-                      {
-                        std::lock_guard lock(mutex_);
-                        for (const auto anime_id : batch)
-                          if (!returned.contains(anime_id))
-                            anime_cache_.markCardChecked(anime_id);
-                      }
-                      notify_anime_status_subscribers(status, "metadata",
-                                                      batch);
-                    });
+    subscribeSearch(
+        std::move(params),
+        [this, status, batch](yani::SearchInput,
+                              std::vector<yani::SearchResult> results,
+                              bool updated) {
+          if (!updated) return;
+          std::unordered_set<std::int64_t> returned;
+          for (const auto &result : results) returned.insert(result.anime_id);
+          {
+            std::lock_guard lock(mutex_);
+            for (const auto anime_id : batch)
+              if (!returned.contains(anime_id))
+                anime_cache_.markCardChecked(anime_id);
+          }
+          notify_anime_status_subscribers(status, "metadata", batch);
+          drain_notifications();
+        },
+        [this, status, batch](yani::ApiError error) {
+          notify_anime_status_subscribers(status, "error", batch,
+                                          std::move(error));
+          drain_notifications();
+        });
   }
 }
 
@@ -662,10 +664,10 @@ void Core::cancel_anime_status_subscription(AnimeStatus status,
 }
 
 #define DEFINE_ANIME_STATUS_METHODS(Name, Value)                               \
-  bool Core::add##Name(std::int64_t id) {                                      \
+  yani::Result<bool> Core::add##Name(std::int64_t id) {                        \
     return add_anime_status(AnimeStatus::Value, id);                           \
   }                                                                            \
-  bool Core::remove##Name(std::int64_t id) {                                   \
+  yani::Result<bool> Core::remove##Name(std::int64_t id) {                     \
     return remove_anime_status(AnimeStatus::Value, id);                        \
   }                                                                            \
   bool Core::is##Name(std::int64_t id) const {                                 \

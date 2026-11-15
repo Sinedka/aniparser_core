@@ -3,8 +3,14 @@
 #include <algorithm>
 #include <iostream>
 
-Core::Core() {
-  auto saved_state = save_manager_.loadState();
+Core::Core() : Core(ApiBackend{}) {}
+
+Core::Core(ApiBackend backend) : backend_(std::move(backend)) {
+  auto loaded = save_manager_.loadState();
+  if (!loaded)
+    std::cerr << "[core] storage is read-only: " << loaded.error().message
+              << '\n';
+  auto saved_state = loaded.value_or(aniparser::PersistentState{});
   bool normalize_state =
       saved_state.history.size() > kHistoryLimit ||
       saved_state.favorites.size() > kHistoryLimit ||
@@ -44,5 +50,5 @@ Core::Core() {
 }
 Core::~Core() {
   std::cerr << "[core] destroying instance=" << this << '\n';
-  tasks_.shutdown();
+  tasks_.shutdown(true);
 }

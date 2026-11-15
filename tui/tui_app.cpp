@@ -7,8 +7,10 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -18,6 +20,7 @@
 
 #include "clipboard.hpp"
 #include "ipc_client.hpp"
+#include "state_utils.hpp"
 
 namespace aniparser::tui {
 namespace {
@@ -51,26 +54,6 @@ std::string value_string(const Json &object, std::string_view key) {
   if (value == object.end() || value->is_null()) return {};
   if (value->is_string()) return value->get<std::string>();
   return value->dump();
-}
-
-bool has_value(const Json &value) {
-  if (value.is_null()) return false;
-  if (value.is_string()) return !value.get_ref<const std::string &>().empty();
-  if (value.is_array() || value.is_object()) return !value.empty();
-  if (value.is_number()) return value.get<double>() != 0.0;
-  return true;
-}
-
-void merge_snapshot(Json &target, const Json &update) {
-  if (target.is_object() && update.is_object()) {
-    for (auto it = update.begin(); it != update.end(); ++it) {
-      if (!has_value(it.value())) continue;
-      if (!target.contains(it.key())) target[it.key()] = it.value();
-      else merge_snapshot(target[it.key()], it.value());
-    }
-  } else if (has_value(update)) {
-    target = update;
-  }
 }
 
 std::string joined_names(const Json &items, std::string_view field) {
@@ -126,17 +109,22 @@ void append_utf8(std::string &target, uint32_t codepoint) {
   }
 }
 
-void erase_last_utf8(std::string &text) {
-  if (text.empty()) return;
-  text.pop_back();
-  while (!text.empty() &&
-         (static_cast<unsigned char>(text.back()) & 0xc0) == 0x80)
-    text.pop_back();
+std::string quality_label(std::string_view quality) {
+  const bool numeric = !quality.empty() &&
+                       std::all_of(quality.begin(), quality.end(), [](char ch) {
+                         return ch >= '0' && ch <= '9';
+                       });
+  return std::string(quality) + (numeric ? "p" : "");
 }
 
+struct StreamOption {
+  std::string quality;
+  std::string url;
+};
 struct Episode {
   std::string number;
   std::string iframe;
+  std::vector<StreamOption> streams;
 };
 struct Dubber {
   std::string name;
@@ -144,11 +132,8 @@ struct Dubber {
 };
 struct Player {
   std::string name;
+  bool anilibria = false;
   std::vector<Dubber> dubbers;
-};
-struct StreamOption {
-  std::string quality;
-  std::string url;
 };
 
 class TuiApplication {
@@ -156,7 +141,25 @@ class TuiApplication {
   TuiApplication(IpcClient &ipc, notcurses* context)
     : ipc_(ipc)
     , context_(context)
-    , plane_(notcurses_stdplane(context)) {}
+    , plane_(notcurses_stdplane(context)) {
+    ipc_.on_wait = [this] {
+      draw();
+      timespec immediate{};
+      ncinput input{};
+      const auto key = notcurses_get(context_, &immediate, &input);
+      if (input.evtype == NCTYPE_RELEASE) return true;
+      if (key == static_cast<uint32_t>(-1) || key == 'q' || key == 'Q') {
+        quit_requested_ = true;
+        return false;
+      }
+      if (key == NCKEY_ESC) return false;
+      if (key != 0 && key != static_cast<uint32_t>(-1) && key != NCKEY_RESIZE &&
+          pending_input_.size() < 256)
+        pending_input_.emplace_back(key, input);
+      return true;
+    };
+  }
+  ~TuiApplication() { ipc_.on_wait = {}; }
 
   void initialize() {
     const auto reply =
@@ -166,14 +169,21 @@ class TuiApplication {
   }
   int run() {
     bool running = true;
-    while (running) {
+    while (running && !quit_requested_) {
       pump_events();
       draw();
       timespec timeout{0, 100'000'000};
       ncinput input{};
-      const auto key = notcurses_get(context_, &timeout, &input);
-      if (key == (uint32_t)-1 || key == 0 || input.evtype == NCTYPE_RELEASE)
-        continue;
+      uint32_t key;
+      if (pending_input_.empty())
+        key = notcurses_get(context_, &timeout, &input);
+      else {
+        key = pending_input_.front().first;
+        input = pending_input_.front().second;
+        pending_input_.pop_front();
+      }
+      if (key == static_cast<uint32_t>(-1)) break;
+      if (key == 0 || input.evtype == NCTYPE_RELEASE) continue;
       if (key == 'q' || key == 'Q') running = false;
       else if (key == NCKEY_UP) move(-1);
       else if (key == NCKEY_DOWN) move(1);
@@ -204,12 +214,94 @@ class TuiApplication {
     StreamLinks
   };
 
+  struct NavigationState {
+    Screen screen;
+    Screen return_screen;
+    std::size_t selected, return_selected, player, dubber, episode;
+    std::int64_t anime_id, request_id;
+    bool loading;
+    Json detail;
+    std::vector<Player> players;
+    std::vector<StreamOption> streams;
+    std::vector<AnimeRow> viewing;
+    std::vector<AnimeRow> search_rows;
+    std::string query;
+    std::int64_t search_request_id, next_offset;
+    bool has_more;
+  };
+  std::optional<NavigationState> search_return_state_;
+  std::vector<NavigationState> detail_back_stack_;
+
+  NavigationState capture_navigation() const {
+    return NavigationState{screen_,
+                           return_screen_,
+                           selected_,
+                           return_selected_,
+                           player_index_,
+                           dubber_index_,
+                           episode_selection_,
+                           detail_id_,
+                           detail_request_id_,
+                           detail_loading_,
+                           detail_,
+                           players_,
+                           stream_options_,
+                           viewing_rows_,
+                           search_rows_,
+                           query_,
+                           search_request_id_,
+                           next_offset_,
+                           search_has_more_};
+  }
+  void restore_navigation(NavigationState state, bool restore_search) {
+    screen_ = state.screen;
+    return_screen_ = state.return_screen;
+    selected_ = state.selected;
+    return_selected_ = state.return_selected;
+    player_index_ = state.player;
+    dubber_index_ = state.dubber;
+    episode_selection_ = state.episode;
+    detail_id_ = state.anime_id;
+    detail_request_id_ = state.request_id;
+    detail_loading_ = state.loading;
+    detail_ = std::move(state.detail);
+    players_ = std::move(state.players);
+    stream_options_ = std::move(state.streams);
+    viewing_rows_ = std::move(state.viewing);
+    if (restore_search) {
+      search_rows_ = std::move(state.search_rows);
+      query_ = std::move(state.query);
+      search_request_id_ = state.search_request_id;
+      next_offset_ = state.next_offset;
+      search_has_more_ = state.has_more;
+    }
+    if (detail_loading_ && screen_ != Screen::Feed &&
+        screen_ != Screen::Search) {
+      screen_ = Screen::Details;
+      try {
+        const auto reply =
+            ipc_.request("subscribeAnime", {{"anime_id", detail_id_}});
+        if (!reply.value("ok", false))
+          throw std::runtime_error(reply.value("error", "Anime failed"));
+        detail_request_id_ = reply.at("id").get<std::int64_t>();
+        update_anime(reply.value("anime", Json::object()));
+        detail_loading_ = reply.value("refreshing", false);
+      } catch (const std::exception &error) {
+        detail_loading_ = false;
+        status_ = error.what();
+      }
+    }
+    selected_ = bounded_selection(selected_, active_menu_size());
+  }
+
   void load_feed() {
     try {
       const auto reply = ipc_.request("subscribeFeed");
       if (!reply.value("ok", false))
         throw std::runtime_error(reply.value("error", "Feed failed"));
       update_feed(reply.value("feed", Json::object()));
+      detail_back_stack_.clear();
+      search_return_state_.reset();
       feed_request_id_ = reply.value("id", int64_t{-1});
       screen_ = Screen::Feed;
       selected_ = 0;
@@ -249,38 +341,50 @@ class TuiApplication {
     next_offset_ = static_cast<int64_t>(offset + limit);
   }
 
-  void update_anime(const Json &snapshot, bool merge = false) {
-    if (merge && detail_.is_object()) merge_snapshot(detail_, snapshot);
-    else detail_ = snapshot;
+  void update_anime(const Json &snapshot) {
+    detail_loading_ = !snapshot.is_object();
+    detail_ = snapshot.is_object() ? snapshot : Json::object();
     build_players();
+    // A new authoritative model invalidates all menus derived from the old one.
+    if (screen_ == Screen::Players || screen_ == Screen::Dubbers ||
+        screen_ == Screen::Episodes || screen_ == Screen::StreamLinks ||
+        screen_ == Screen::Viewing)
+      screen_ = Screen::Details;
+    player_index_ = dubber_index_ = episode_selection_ = 0;
+    stream_options_.clear();
+    selected_ = bounded_selection(selected_, active_menu_size());
   }
 
   void search_prompt() {
-    search_return_screen_ = screen_;
-    search_return_selected_ = selected_;
-    query_.clear();
+    const auto return_state = capture_navigation();
+    std::string entered;
     status_ = "Type a title and press Enter · Esc cancels";
     log_line("/tmp/aniparser_tui-search.log", "search prompt opened");
     draw();
     for (;;) {
       ncinput input{};
       const auto key = notcurses_get(context_, nullptr, &input);
+      if (key == static_cast<uint32_t>(-1)) {
+        quit_requested_ = true;
+        return;
+      }
       if (input.evtype == NCTYPE_RELEASE) continue;
       log_line("/tmp/aniparser_tui-search.log",
                "prompt key=" + std::to_string(key));
       if (key == NCKEY_ESC) return;
       if (key == NCKEY_ENTER || key == '\n' || key == '\r') break;
-      if ((key == NCKEY_BACKSPACE || key == 127) && !query_.empty()) {
-        erase_last_utf8(query_);
+      if ((key == NCKEY_BACKSPACE || key == 127) && !entered.empty()) {
+        erase_last_utf8(entered);
       } else if (key >= 32 && key <= 0x10ffff) {
-        append_utf8(query_, key);
+        append_utf8(entered, key);
       }
-      status_ = "Search: " + query_ + " · Enter to search · Esc to cancel";
+      status_ = "Search: " + entered + " · Enter to search · Esc to cancel";
       draw();
     }
     log_line("/tmp/aniparser_tui-search.log",
-             "query entered: " + Json(query_).dump());
-    search(query_, 0);
+             "query entered: " + Json(entered).dump());
+    if (screen_ != Screen::Search) search_return_state_ = return_state;
+    search(entered, 0);
   }
 
   void search(const std::string &query, std::int64_t offset) {
@@ -308,20 +412,25 @@ class TuiApplication {
 
   void open_anime(std::int64_t id) {
     try {
-      return_screen_ = screen_;
-      return_selected_ = selected_;
+      if (detail_back_stack_.size() >= 64)
+        throw std::runtime_error("Navigation depth limit reached");
+      auto previous = capture_navigation();
       const auto reply = ipc_.request("subscribeAnime", {{"anime_id", id}});
       if (!reply.value("ok", false))
         throw std::runtime_error(reply.value("error", "Anime request failed"));
+      detail_back_stack_.push_back(std::move(previous));
+      return_screen_ = screen_;
+      return_selected_ = selected_;
       detail_request_id_ = reply.value("id", int64_t{-1});
-      update_anime(reply.value("anime", Json::object()));
       detail_id_ = id;
+      update_anime(reply.value("anime", Json::object()));
+      detail_loading_ = reply.value("refreshing", false);
       screen_ = Screen::Details;
       selected_ = 0;
-      status_ = detail_.is_null() ? "Loading anime from API…"
-                                  : (reply.value("refreshing", false)
-                                         ? "Cached anime · refreshing API"
-                                         : "Anime details");
+      status_ = detail_loading_ ? "Loading anime from API…"
+                                : (reply.value("refreshing", false)
+                                       ? "Cached anime · refreshing API"
+                                       : "Anime details");
     } catch (const std::exception &error) { status_ = error.what(); }
   }
 
@@ -342,6 +451,9 @@ class TuiApplication {
       }
       if (!player.dubbers.empty()) players_.push_back(std::move(player));
     }
+    const auto remote_ids = detail_.value("remote_ids", Json::object());
+    if (!value_string(remote_ids, "anilibria_alias").empty())
+      players_.push_back(Player{.name = "AniLibria", .anilibria = true});
   }
 
   void activate() {
@@ -349,7 +461,8 @@ class TuiApplication {
       if (selected_ >= stream_options_.size()) return;
       const auto &option = stream_options_[selected_];
       if (copy_to_clipboard(option.url))
-        status_ = "Copied " + option.quality + "p stream URL to clipboard";
+        status_ = "Copied " + quality_label(option.quality) +
+                  " stream URL to clipboard";
       else status_ = "Clipboard unavailable · install wl-copy, xclip, or xsel";
       return;
     }
@@ -364,13 +477,21 @@ class TuiApplication {
       return;
     }
     if (screen_ == Screen::Players) {
+      if (selected_ >= players_.size()) return;
       player_index_ = selected_;
+      if (players_[player_index_].anilibria) {
+        load_anilibria_episodes();
+        return;
+      }
       screen_ = Screen::Dubbers;
       selected_ = 0;
       status_ = "Choose dubbing";
       return;
     }
     if (screen_ == Screen::Dubbers) {
+      if (player_index_ >= players_.size() ||
+          selected_ >= players_[player_index_].dubbers.size())
+        return;
       dubber_index_ = selected_;
       screen_ = Screen::Episodes;
       selected_ = 0;
@@ -385,6 +506,40 @@ class TuiApplication {
     if (selected_ < rows.size()) open_anime(rows[selected_].id);
   }
 
+  void load_anilibria_episodes() {
+    if (player_index_ >= players_.size()) return;
+    status_ = "Loading AniLibria episodes and HLS links…";
+    try {
+      const auto reply =
+          ipc_.request("getAnilibriaVideos", {{"anime_id", detail_id_}});
+      if (!reply.value("ok", false))
+        throw std::runtime_error(
+            reply.value("error", "AniLibria request failed"));
+      Dubber dubber{.name = "AniLibria"};
+      for (const auto &item : reply.value("episodes", Json::array())) {
+        const auto ordinal = item.value("ordinal", int64_t{0});
+        if (ordinal <= 0) continue;
+        Episode episode{.number = std::to_string(ordinal)};
+        for (const auto &quality : item.value("qualities", Json::array())) {
+          const auto name = value_string(quality, "quality");
+          const auto url = value_string(quality, "url");
+          if (!name.empty() && !url.empty())
+            episode.streams.push_back({name, url});
+        }
+        if (!episode.streams.empty())
+          dubber.episodes.push_back(std::move(episode));
+      }
+      if (dubber.episodes.empty())
+        throw std::runtime_error(
+            "AniLibria returned no episodes with HLS links");
+      players_[player_index_].dubbers.clear();
+      players_[player_index_].dubbers.push_back(std::move(dubber));
+      screen_ = Screen::Dubbers;
+      selected_ = 0;
+      status_ = "Choose dubbing";
+    } catch (const std::exception &error) { status_ = error.what(); }
+  }
+
   void show_stream_links() {
     if (player_index_ >= players_.size() ||
         dubber_index_ >= players_[player_index_].dubbers.size())
@@ -394,19 +549,24 @@ class TuiApplication {
     if (selected_ >= episodes.size()) return;
     status_ = "Parsing episode stream links…";
     try {
-      const auto reply = ipc_.request("getVideoOptions",
-                                      {{"iframe", episodes[selected_].iframe}});
-      if (!reply.value("ok", false))
-        throw std::runtime_error(reply.value("error", "Video parse failed"));
-      const auto qualities = reply.value("qualities", Json::array());
-      if (!qualities.is_array() || qualities.empty())
-        throw std::runtime_error("No stream qualities returned");
       stream_options_.clear();
-      for (const auto &option : qualities) {
-        const auto quality = value_string(option, "quality");
-        const auto url = value_string(option, "url");
-        if (!quality.empty() && !url.empty())
-          stream_options_.push_back({quality, url});
+      const auto &episode = episodes[selected_];
+      if (players_[player_index_].anilibria) {
+        stream_options_ = episode.streams;
+      } else {
+        const auto reply =
+            ipc_.request("getVideoOptions", {{"iframe", episode.iframe}});
+        if (!reply.value("ok", false))
+          throw std::runtime_error(reply.value("error", "Video parse failed"));
+        const auto qualities = reply.value("qualities", Json::array());
+        if (!qualities.is_array() || qualities.empty())
+          throw std::runtime_error("No stream qualities returned");
+        for (const auto &option : qualities) {
+          const auto quality = value_string(option, "quality");
+          const auto url = value_string(option, "url");
+          if (!quality.empty() && !url.empty())
+            stream_options_.push_back({quality, url});
+        }
       }
       if (stream_options_.empty())
         throw std::runtime_error("No valid stream links returned");
@@ -424,7 +584,8 @@ class TuiApplication {
     std::vector<std::vector<std::string>> blocks;
     for (const auto &option : stream_options_) {
       std::vector<std::string> lines;
-      lines.push_back("Quality " + option.quality + "p · Enter copies URL");
+      lines.push_back("Quality " + quality_label(option.quality) +
+                      " · Enter copies URL");
       for (std::size_t offset = 0; offset < option.url.size();
            offset += chunk_size)
         lines.push_back("  " + option.url.substr(offset, chunk_size));
@@ -492,12 +653,25 @@ class TuiApplication {
       screen_ = Screen::Details;
       selected_ = 0;
     } else if (screen_ == Screen::Details) {
-      screen_ = return_screen_;
-      selected_ = return_selected_;
+      if (!detail_back_stack_.empty()) {
+        auto previous = std::move(detail_back_stack_.back());
+        detail_back_stack_.pop_back();
+        restore_navigation(std::move(previous), false);
+      } else {
+        screen_ = Screen::Feed;
+        selected_ = 0;
+      }
     } else if (screen_ == Screen::Search) {
-      screen_ = search_return_screen_;
-      selected_ = search_return_selected_;
+      if (search_return_state_) {
+        auto state = std::move(*search_return_state_);
+        search_return_state_.reset();
+        restore_navigation(std::move(state), true);
+      } else {
+        screen_ = Screen::Feed;
+        selected_ = 0;
+      }
     }
+    selected_ = bounded_selection(selected_, active_menu_size());
   }
 
   void pump_events() {
@@ -505,20 +679,29 @@ class TuiApplication {
       const auto type = event.value("event", std::string{});
       if (type == "feed.updated" &&
           event.value("id", int64_t{-1}) == feed_request_id_) {
+        if (!event.value("ok", false)) {
+          status_ = event.value("error", "Feed failed");
+          continue;
+        }
         update_feed(event.value("feed", Json::object()));
         status_ = "Feed refreshed";
       } else if (type == "search.updated" &&
                  event.value("id", int64_t{-1}) == search_request_id_) {
         log_line("/tmp/aniparser_tui-search.log",
                  "search.updated event: " + event.dump());
+        if (!event.value("ok", false)) {
+          status_ = event.value("error", "Search failed");
+          continue;
+        }
         update_search(event, true);
         status_ = "Search results refreshed";
       } else if (type == "anime.updated" &&
                  event.value("id", int64_t{-1}) == detail_request_id_) {
+        detail_loading_ = false;
         log_line("/tmp/aniparser_tui-anime.log",
                  "anime.updated event: " + event.dump());
         if (event.value("ok", false) && !event.at("anime").is_null()) {
-          update_anime(event.at("anime"), true);
+          update_anime(event.at("anime"));
           status_ = "Anime details updated";
         } else {
           const auto error = event.value("error", std::string{});
@@ -551,7 +734,11 @@ class TuiApplication {
     history_ = items;
     history_revision_ = revision;
     history_sequence_ = sequence;
-    if (updated) status_ = "History updated";
+    if (updated)
+      status_ = message.value("ok", false)
+                    ? "History updated"
+                    : "History refresh failed: " +
+                          message.value("error", std::string{});
   }
 
   void text(int y,
@@ -604,6 +791,7 @@ class TuiApplication {
       text(3, 3, context, kMuted);
     }
     if (screen_ == Screen::Details) {
+      if (detail_loading_) text(3, 3, "Loading anime…", kMuted);
       text(4, 3, value_string(detail_, "title"), 0xffffff, kPanel,
            NCSTYLE_BOLD);
       std::string metadata =
@@ -729,14 +917,13 @@ class TuiApplication {
     }
   }
 
+  std::deque<std::pair<uint32_t, ncinput>> pending_input_;
   IpcClient &ipc_;
   notcurses* context_;
   ncplane* plane_;
   Screen screen_ = Screen::Feed;
   Screen return_screen_ = Screen::Feed;
-  Screen search_return_screen_ = Screen::Feed;
   std::size_t return_selected_ = 0;
-  std::size_t search_return_selected_ = 0;
   std::size_t selected_ = 0;
   std::size_t player_index_ = 0;
   std::size_t dubber_index_ = 0;
@@ -747,6 +934,8 @@ class TuiApplication {
   std::int64_t detail_id_ = 0;
   std::int64_t next_offset_ = 10;
   bool search_has_more_ = false;
+  bool detail_loading_ = false;
+  bool quit_requested_ = false;
   std::string query_;
   std::string status_ = "Ready";
   Json feed_ = Json::object();
@@ -772,12 +961,15 @@ int run(const std::string &endpoint) {
     const auto hello = ipc.request("hello");
     if (!hello.value("ok", false) || hello.value("protocol", 0) != 3)
       throw std::runtime_error("IPC protocol is incompatible");
-    auto* context = notcurses_init(nullptr, stdout);
+    const auto stop_context = [](notcurses* context) {
+      notcurses_stop(context);
+    };
+    std::unique_ptr<notcurses, decltype(stop_context)> context(
+        notcurses_core_init(nullptr, stdout), stop_context);
     if (!context) throw std::runtime_error("Cannot initialize notcurses");
-    TuiApplication tui(ipc, context);
+    TuiApplication tui(ipc, context.get());
     tui.initialize();
     const int result = tui.run();
-    notcurses_stop(context);
     return result;
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

@@ -1,6 +1,5 @@
 #pragma once
 #include <cpr/cpr.h>
-#include "types.hpp"
 
 #include <expected>
 #include <future>
@@ -9,6 +8,7 @@
 #include <vector>
 
 #include "models.hpp"
+#include "types.hpp"
 
 namespace yani {
 
@@ -28,6 +28,10 @@ Result<AnimeResult> getAnime(std::string_view alias_or_id,
 Result<std::vector<SearchResult>> searchTitles(const SearchInput &input);
 
 Result<FeedResponse> getFeed();
+
+// Resolve the AniLibria alias stored in yani.tv Anime metadata and return its
+// sorted episodes with available HLS qualities.
+Result<nlohmann::json> getAnilibriaVideos(std::int64_t anime_id);
 
 Result<nlohmann::json> get(std::string_view path,
                            const cpr::Parameters &params = {});

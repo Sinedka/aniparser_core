@@ -3,7 +3,8 @@
 `src/server/` — мост между `Core` и внешним клиентом.
 
 - `Server` (`server.hpp/.cpp`) — фасад над Core плюс video extractor calls.
-- `IpcServer` — transport и парсер JSON Lines.
+- `IpcServer` — transport и парсер JSON Lines. Общая маршрутизация команд
+  находится в `ipc/protocol.hpp`, общая валидация — в `request_validation.hpp`.
 - `ipc/unix.cpp` — Linux/Unix domain socket.
 - `ipc/windows.cpp` — Windows named pipe.
 - `ipc/CMakeLists.txt` выбирает один платформенный транспорт и собирает его
@@ -59,6 +60,7 @@ snapshot и событие обновления.
 | `updateAnimeSaveData` | поля прогресса | сохранённый `save_data` | обновление страницы, если ID в её составе |
 | `getVideoOptions` | `iframe` | `qualities: [{quality,url}, ...]` | нет |
 | `getVideo` | `iframe`, optional `quality` | `url` | нет |
+| `getAnilibriaVideos` | `anime_id` | `episodes: [{ordinal,name?,qualities:[{quality,url}]}]` | нет |
 
 Успешное начальное сообщение содержит `ok:true` и `id`. Если снимка ещё нет,
 Anime отправляется как `null`, Search — с пустым `results`, Feed — с пустыми
@@ -79,10 +81,9 @@ IPC проверяет JSON, тип method и обязательные поля.
 неверный JSON, отсутствующий `anime_id`/`iframe` или неверный тип поля дают
 ошибочный ответ. Входная строка длиннее 1 MiB отклоняется и закрывает клиента.
 
-Anime API ошибка доставляется callback-событием. При ошибке Search/Feed
-немедленный ответ всё равно уже отправлен, но update-событие сейчас не
-формируется; проверьте терминал сервера. Это известная особенность протокола,
-которую нужно учесть, если будете добавлять единый канал ошибок.
+Anime, Search и Feed API ошибки доставляются terminal callback-событием:
+`*.updated`, `ok:false`, `error`, `status`, `refreshing:false`. Последний
+успешный snapshot остаётся в кэше. Ожидание stream после ошибки закрывается.
 
 ## Anime JSON
 
@@ -102,10 +103,19 @@ iframe-ссылки не попадут в группы. Эпизоды сорт
 
 `getVideoOptions` принимает iframe, проверяет extractor registry в
 `src/api/video.cpp`, и для поддержанного плеера получает доступные URL.
-Пока зарегистрирован только Kodik. Ошибка неподдержанного домена возвращается
-как `ok:false`. `getVideo` выбирает указанное качество; если такого качества
+Зарегистрированы Kodik и Aksor. Ошибка неподдержанного домена возвращается
+как `ok:false`. Aksor распознаётся только на хосте `player.aksor.tv` и пути
+`/video/{id}`; его API-ответ с качествами сразу выдаётся клиенту.
+`getVideo` выбирает указанное качество; если такого качества
 нет, API helper возвращает первый доступный поток. `getVideoOptions` предпочтителен,
 когда клиенту нужно показать варианты.
+
+`getAnilibriaVideos` получает `remote_ids.anilibria_alias` из Anime API-данных,
+загружает релиз AniLibria с резервным API-хостом, сортирует серии по `ordinal`
+и возвращает только доступные качества `fhd`, `hd`, `sd`. Это отдельный video
+метод: его серии не входят в `anime.players`. Ошибка содержит `ok:false`, текст
+`error` и HTTP `status` (ноль, если HTTP-ответ не был получен). TUI добавляет
+AniLibria в меню источников, когда Anime JSON содержит соответствующий alias.
 
 ## Куда вносить изменения
 
@@ -115,3 +125,10 @@ iframe-ссылки не попадут в группы. Эпизоды сорт
 - Новый video player: реализовать общий `VideoExtractor` и зарегистрировать его;
   серверная форма меню автоматически получает только поддержанные записи.
 - Политика cache/refresh относится к Core, не переносите её в IPC.
+
+Обработчики мутаций используют `Result<bool>` Core и возвращают ошибки
+сохранения с `ok:false`. Уточнения лимитов, `removeAnimeSaveData`, terminal
+errors и `data.committed` описаны в IPC.md. Оба транспорта используют один
+JSON dispatcher; платформенный код отвечает за владение и отмену I/O.
+На Windows используются overlapped I/O и cancellation events. Unix send
+не блокирует отмену и имеет общий deadline пять секунд.

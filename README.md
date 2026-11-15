@@ -1,259 +1,147 @@
-# Aniparser Core
+# Server и IPC
 
-Сервер на C++23 получает данные аниме с `api.yani.tv`, держит последние
-ответы в памяти процесса и отдаёт их клиентам через IPC. История, избранное,
-статусы просмотра и позиция серии сохраняются на диск. Linux TUI — отдельный
-клиент этого IPC. Чтобы подключить собственное приложение, достаточно читать
-и писать строки JSON через Unix-сокет; связывать клиент с библиотеками C++ или
-устройством внутреннего кэша не нужно.
+`src/server/` — мост между `Core` и внешним клиентом.
 
-## Быстрый запуск
+- `Server` (`server.hpp/.cpp`) — фасад над Core плюс video extractor calls.
+- `IpcServer` — transport и парсер JSON Lines. Общая маршрутизация команд
+  находится в `ipc/protocol.hpp`, общая валидация — в `request_validation.hpp`.
+- `ipc/unix.cpp` — Linux/Unix domain socket.
+- `ipc/windows.cpp` — Windows named pipe.
+- `ipc/CMakeLists.txt` выбирает один платформенный транспорт и собирает его
+  отдельной object-целью; реализация включается в библиотеку `server`.
+- `main.cpp` — создаёт Core → Server → IpcServer и ждёт SIGINT/SIGTERM.
 
-Зависимости Linux сборки описаны в `flake.nix`. В Linux с Nix:
+Клиент связывается с протоколом, а не с C++-типами: изменение JSON-формы
+требует изменить `Server::animeToJson`/IPC и документацию, но не требует линковать
+Core в клиент.
 
-```sh
-nix develop
-cmake -S . -B out/Debug -DCMAKE_BUILD_TYPE=Debug
-cmake --build out/Debug -j2
-```
-
-Запустите сервер и оставьте его работать:
+## Запуск сервера
 
 ```sh
 out/Debug/src/server/aniparser_server /tmp/aniparser.sock
 ```
 
-На Linux сервер слушает `/tmp/aniparser.sock` по умолчанию. Можно передать
-другой путь **первым** аргументом. Сервер принимает только один позиционный
-аргумент endpoint: команда `aniparser_server aniparser /tmp/x.sock` выберет
-`aniparser`; второй аргумент не используется.
-На Linux socket создаётся с правами `0600`, поэтому клиент обычно нужно
-запускать от того же Unix-пользователя, что и сервер.
+Первый аргумент — весь endpoint. На Linux endpoint по умолчанию
+`/tmp/aniparser.sock`; Windows default — `\\.\pipe\aniparser`. Дополнительный
+аргумент не является вторым путём или именем кэша. На Linux server удаляет
+оставшийся socket-файл, только если проверка показывает, что socket устарел;
+обычный файл с таким именем не удаляется. Доступ к созданному socket ограничен
+правами `0600`.
 
-Во втором терминале запустите TUI:
+При запуске сервер печатает endpoint, команды IPC (`[ipc command]`) и ошибки
+(`[ipc error]`). API worker пишет API ошибки и команду curl для воспроизведения
+Anime-запроса. Логи идут в stderr, кроме строки `IPC server listening ...`,
+которая идёт в stdout.
 
-```sh
-out/Debug/tui/aniparser_tui /tmp/aniparser.sock
-```
+## Методы
 
-Если путь не передан, TUI тоже использует `/tmp/aniparser.sock`. Это Linux-
-клиент; для копирования ссылок из меню потоков нужны `wl-copy`, `xclip` или
-`xsel`. Клавиши: `/` — поиск, стрелки и Enter — переход по меню, `n` — следующая
-страница поиска, Esc — назад, `q` — выход.
+Все сообщения — JSON-объекты, по одному на строку. Запрос имеет `id` и `method`.
+Один request id может иметь несколько ответных сообщений: первоначальный
+snapshot и событие обновления.
 
-## Подключение своего клиента
+| Метод | Поля | Синхронный ответ | Событие после обновления |
+| --- | --- | --- | --- |
+| `hello` | нет | `{ok:true, protocol:3, transport:"json-lines"}` | нет |
+| `subscribeAnime` | `anime_id` | `anime`, `refreshing`, `loaded` | `anime.updated` |
+| `subscribeSearch` | `params` | `results`, `offset`, `limit`, `refreshing` | `search.updated` |
+| `subscribeFeed` | нет | `feed`, `refreshing` | `feed.updated` |
+| `unsubscribeAnime` / `unsubscribeSearch` / `unsubscribeFeed` | `target_id` subscribe request | `{unsubscribed}` | нет |
+| `subscribeHistory` | необязательные `offset`, `limit` (1–50) | страница `items`, `revision`, `sequence` | новые snapshots `history.updated` для этой страницы |
+| `unsubscribeHistory` | — | отменяет подписку этого соединения | нет |
+| `subscribeFavorites` | необязательные `offset`, `limit` (1–50) | страница `items`, `revision`, `sequence` | snapshots `favorites.updated` |
+| `unsubscribeFavorites` | — | отменяет подписку избранного этого соединения | нет |
+| `addHistory` / `removeHistory` | `anime_id` | результат операции и `revision` | обновление затронутых страниц |
+| `addFavorite` / `removeFavorite` | `anime_id` | результат операции и `revision` | обновление затронутых страниц |
+| `subscribePlanned` / `subscribeWatched` / `subscribeCompleted` / `subscribeDropped` | необязательные `offset`, `limit` | страница и `revision`, `sequence` | статусное `.updated` событие |
+| `add...` / `remove...` для каждого статуса | `anime_id` | результат операции и `revision` | обновление каждого затронутого статуса |
+| `isFavorite` | `anime_id` | bool в `value` (`isFavourite`, `isfavorite`, `isfavourite` — aliases) | нет |
+| `getStatus` | `anime_id` | int в `status` | нет |
+| `getAnimeSaveData` | `anime_id` | `save_data` или `null` | нет |
+| `updateAnimeSaveData` | поля прогресса | сохранённый `save_data` | обновление страницы, если ID в её составе |
+| `getVideoOptions` | `iframe` | `qualities: [{quality,url}, ...]` | нет |
+| `getVideo` | `iframe`, optional `quality` | `url` | нет |
+| `getAnilibriaVideos` | `anime_id` | `episodes: [{ordinal,name?,qualities:[{quality,url}]}]` | нет |
 
-### Как устроен транспорт
-
-- Linux: Unix domain stream socket, по умолчанию `/tmp/aniparser.sock`.
-- Windows: именованный канал `\\.\pipe\aniparser` по умолчанию.
-- Android: endpoint обязателен и передаётся первым аргументом сервера.
-- Сообщения — JSON Lines: один JSON-объект на строку, завершённую `\n`.
-- Каждому запросу задайте `id`. Ответ на запрос и его будущие события
-  используют тот же `id`.
-- Поддерживайте соединение открытым, если хотите получать события обновления.
-  Запросы и ответы могут приходить частями TCP/pipe-потока: клиент должен
-  накапливать байты до `\n` и разбирать каждую полную строку отдельно.
-- Размер одной входящей серверу строки ограничен 1 MiB.
-
-На Windows сервер создаёт named pipe с именем `\\.\pipe\aniparser`.
-Windows-клиент открывает его как duplex byte stream через `CreateFile`, затем
-использует тот же JSON Lines формат. POSIX-пример ниже намеренно использует
-`AF_UNIX` и работает только на Linux.
-
-Сначала отправьте проверку протокола:
-
-```json
-{"id":1,"method":"hello"}
-```
-
-Ответ версии 3:
-
-```json
-{"id":1,"ok":true,"protocol":3,"transport":"json-lines"}
-```
-
-Если `ok` равен `false` или версия протокола неизвестна, клиенту следует
-показать ошибку и не отправлять остальные методы.
-В версии 3 методы потоковых Anime/Search/Feed/History/Favorites/статусов
-называются `subscribe...`; старые имена `getAnime`, `getSearch`, `getFeed` и
-`getHistory` больше не принимаются.
-
-### Методы
-
-Каждый объект запроса содержит `id` и `method`.
-
-| Метод | Дополнительные поля | Что приходит в ответе |
-| --- | --- | --- |
-| `hello` | — | `protocol`, `transport` |
-| `subscribeFeed` | — | snapshot `feed`, затем `feed.updated` |
-| `subscribeSearch` | `params` — объект фильтров | snapshot `results`, затем `search.updated` |
-| `subscribeAnime` | `anime_id` — положительное целое | snapshot `anime`, затем `anime.updated` |
-| `unsubscribeAnime`, `unsubscribeSearch`, `unsubscribeFeed` | `target_id` исходной subscribe-команды | отменяют доставку её позднего обновления этому клиенту |
-| `subscribeHistory` | необязательные `offset`, `limit` (по умолчанию 0/20, максимум 50) | страница `items`, затем `history.updated` snapshots |
-| `unsubscribeHistory` | — | отменяет историю-подписку соединения |
-| `addHistory` | `anime_id` | добавленный ID и revision |
-| `removeHistory` | `anime_id` | флаг `removed` и revision |
-| `subscribeFavorites` / `unsubscribeFavorites` | `offset`, `limit` для subscribe | snapshots и `favorites.updated` |
-| `addFavorite` / `removeFavorite` | `anime_id` | добавить/удалить избранное |
-| `subscribePlanned`, `subscribeWatched`, `subscribeCompleted`, `subscribeDropped` | `offset`, `limit` | страницы статусов и `.updated` события |
-| `addPlanned`, `addWatched`, `addCompleted`, `addDropped` | `anime_id` | установить статус, убрав его из остальных |
-| `removePlanned`, `removeWatched`, `removeCompleted`, `removeDropped` | `anime_id` | удалить только указанный статус |
-| `isFavorite` | `anime_id` | boolean в `value`; также принимаются `isFavourite`, `isfavorite`, `isfavourite` |
-| `getStatus` | `anime_id` | код статуса в поле `status` |
-| `getAnimeSaveData` | `anime_id` | `save_data` либо `null` |
-| `updateAnimeSaveData` | `anime_id`, `player`, `dubber`, `episode`, `time` | сохранённые данные просмотра |
-| `getVideoOptions` | `iframe` — ссылка Kodik | `qualities`: список `{quality,url}` |
-| `getVideo` | `iframe`, необязательно `quality` | `url` |
+Успешное начальное сообщение содержит `ok:true` и `id`. Если снимка ещё нет,
+Anime отправляется как `null`, Search — с пустым `results`, Feed — с пустыми
+массивами/объектами модели. Поле `refreshing` показывает, выполняется ли
+обновление сейчас. Для Anime `loaded` говорит, есть ли вообще snapshot.
 
 `getStatus` возвращает `0` без пользовательского статуса, `1` для planned,
-`2` для watched, `3` для completed и `5` для dropped (`4` зарезервирован).
-`getstatus` — alias `getStatus`.
-При добавлении через `addPlanned`/`addWatched`/`addCompleted`/`addDropped`
-аниме убирается из остальных трёх списков. Каждая подписка статуса и избранного
-постраничная, как `subscribeHistory`.
+`2` для watched, `3` для completed и `5` для dropped; значение `4` не
+используется. `getstatus` — alias. При добавлении в один статус аниме
+удаляется из остальных трёх.
 
-Пример поиска:
+### Ошибки
 
-```json
-{"id":2,"method":"subscribeSearch","params":{"q":"магическая битва","offset":0,"limit":10}}
-```
+Ошибка запроса имеет `ok:false`, `id` и `error`; для Anime API update — также
+`event:"anime.updated"`, `anime_id`, `anime:null`, `status`.
 
-Из `params` можно передавать фильтры из `yani::SearchInput`; полный перечень
-есть в [описании API](docs/API.md). Для пагинации задайте `offset` и `limit`.
-Сервер вернёт переданные значения (если они не заданы, `offset` будет `0`, а
-`limit` — `10`).
+IPC проверяет JSON, тип method и обязательные поля. Неподдерживаемый метод,
+неверный JSON, отсутствующий `anime_id`/`iframe` или неверный тип поля дают
+ошибочный ответ. Входная строка длиннее 1 MiB отклоняется и закрывает клиента.
 
-Пример получения аниме и разбора видеопотоков:
+Anime, Search и Feed API ошибки доставляются terminal callback-событием:
+`*.updated`, `ok:false`, `error`, `status`, `refreshing:false`. Последний
+успешный snapshot остаётся в кэше. Ожидание stream после ошибки закрывается.
 
-```json
-{"id":3,"method":"subscribeAnime","anime_id":771}
-{"id":4,"method":"getVideoOptions","iframe":"//kodikplayer.com/season/1/example/720p"}
-```
+## Anime JSON
 
-В `anime` поле `players` имеет вид:
+API возвращает `AnimeResult.videos`, плоский список записей. Перед IPC
+`Server::animeToJson` удаляет ключ `videos` и добавляет сгруппированный массив:
 
 ```json
-[
-  {
-    "name":"Kodik",
-    "dubbers":[
-      {
-        "name":"Озвучка",
-        "episodes":[
-          {"video_id":12,"iframe_url":"//kodikplayer.com/...","number":"1","date":0,"index":0,"skips":{"opening":{"time":"","length":""},"ending":{"time":"","length":""}}}
-        ]
-      }
-    ]
-  }
-]
+{"players":[{"name":"Kodik","dubbers":[{"name":"Озвучка","episodes":[{"video_id":1,"iframe_url":"//kodikplayer.com/...","number":"1","date":0,"index":0,"skips":{"opening":{"time":"","length":""},"ending":{"time":"","length":""}}}]}]}]}
 ```
 
-Поддержанные плееры, озвучки и эпизоды в ответе сгруппированы; эпизоды
-отсортированы по номеру по возрастанию. `getVideoOptions` возвращает доступные
-качества, например:
+Записи без поддержанного плеера, имени плеера, имени озвучки или корректной
+iframe-ссылки не попадут в группы. Эпизоды сортируются по номеру как числа; если
+номер нельзя прочитать как число, используется лексикографический порядок.
+Порядок плееров/озвучек соответствует первому появлению в API-массиве.
 
-```json
-{"id":4,"ok":true,"qualities":[{"quality":"720","url":"https://...m3u8"},{"quality":"480","url":"https://...m3u8"}]}
+## Видео
+
+`getVideoOptions` принимает iframe, проверяет extractor registry в
+`src/api/video.cpp`, и для поддержанного плеера получает доступные URL.
+Зарегистрированы Kodik и Aksor. Ошибка неподдержанного домена возвращается
+как `ok:false`. Aksor распознаётся только на хосте `player.aksor.tv` и пути
+`/video/{id}`; его API-ответ с качествами сразу выдаётся клиенту.
+`getVideo` выбирает указанное качество; если такого качества
+нет, API helper возвращает первый доступный поток. `getVideoOptions` предпочтителен,
+когда клиенту нужно показать варианты.
+
+`getAnilibriaVideos` получает `remote_ids.anilibria_alias` из Anime API-данных,
+загружает релиз AniLibria с резервным API-хостом, сортирует серии по `ordinal`
+и возвращает только доступные качества `fhd`, `hd`, `sd`. Это отдельный video
+метод: его серии не входят в `anime.players`. Ошибка содержит `ok:false`, текст
+`error` и HTTP `status` (ноль, если HTTP-ответ не был получен). TUI добавляет
+AniLibria в меню источников, когда Anime JSON содержит соответствующий alias.
+
+## Куда вносить изменения
+
+- Новый IPC method: добавить validation/handler в оба transport-файла,
+  обновить [src/server/IPC.md](../src/server/IPC.md), этот документ и клиент.
+- Новое поле JSON Anime: изменить сериализацию, IPC-справочник и все клиенты.
+- Новый video player: реализовать общий `VideoExtractor` и зарегистрировать его;
+  серверная форма меню автоматически получает только поддержанные записи.
+- Политика cache/refresh относится к Core, не переносите её в IPC.
+
+Обработчики мутаций используют `Result<bool>` Core и возвращают ошибки
+сохранения с `ok:false`. Уточнения лимитов, `removeAnimeSaveData`, terminal
+errors и `data.committed` описаны в IPC.md. Оба транспорта используют один
+JSON dispatcher; платформенный код отвечает за владение и отмену I/O.
+На Windows используются overlapped I/O и cancellation events. Unix send
+не блокирует отмену и имеет общий deadline пять секунд.
+
+## Автономные регрессионные проверки
+
+```sh
+out/Debug/src/app/aniparser_checks
+python3 tests/ipc_regression.py
 ```
 
-Сейчас URL iframe поддерживает только Kodik. Ссылка `url` — поток для
-видеоплеера; сервер сам не запускает `mpv`. В отличие от кэшируемых Anime,
-Feed и Search, разбор Kodik выполняется прямо при обработке video IPC-запроса;
-клиент ждёт ответ, пока парсер загрузит страницу и получит список качеств.
-
-### Кэш и два ответа на запрос
-
-`subscribeFeed`, `subscribeSearch` и `subscribeAnime` сначала возвращают то, что уже есть в
-серверном кэше. Пустой кэш не блокирует клиента до ответа внешнего API: он
-получит пустой снимок (для Anime — `null`) и `refreshing: true`. После
-успешного запроса сервер отправит вторую строку-событие с тем же `id`:
-
-```json
-{"id":3,"ok":true,"anime":null,"refreshing":true,"loaded":false}
-{"id":3,"event":"anime.updated","ok":true,"anime_id":771,"anime":{...}}
-```
-
-Для остальных методов события называются `feed.updated` и `search.updated`.
-Событие может прийти сразу после первоначального ответа. Клиенту нужно
-маршрутизировать сообщения по `id`, а не полагаться на время прихода.
-
-Кэш существует только внутри процесса сервера, очищается при его завершении и
-считается устаревшим через 5 минут. Успешные результаты поиска и feed также
-заполняют краткие сведения об аниме, чтобы `subscribeAnime` мог сразу вернуть
-частичный объект. После API-обновления приходит полный объект. При ошибке
-обновления сервер сохраняет последнюю успешную версию. Ошибка Anime приходит
-событием `anime.updated` с `ok:false` и `error`; ошибки Feed/Search сейчас
-только пишутся в лог сервера.
-
-Клиент владеет полученными JSON-значениями: запросов `release`, `delete` или
-подтверждения владения нет.
-
-### Минимальный Python-клиент для Linux
-
-Пример проверяет handshake и получает полную карточку Anime. Первое сообщение
-содержит текущий snapshot; если он устарел или отсутствует, пример ожидает
-update event не дольше 40 секунд. В полноценном приложении используйте event
-loop и маршрутизируйте сообщения по `id`.
-
-```python
-import json
-import socket
-
-path = "/tmp/aniparser.sock"
-sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-sock.connect(path)
-reader = sock.makefile("r", encoding="utf-8")
-
-def send(request):
-    sock.sendall((json.dumps(request, ensure_ascii=False) + "\n").encode())
-
-def receive():
-    line = reader.readline()
-    if not line:
-        raise ConnectionError("aniparser_server закрывает соединение")
-    return json.loads(line)
-
-send({"id": 1, "method": "hello"})
-hello = receive()
-if not hello.get("ok") or hello.get("protocol") != 3:
-    raise RuntimeError(f"Несовместимый IPC: {hello}")
-
-send({"id": 2, "method": "subscribeAnime", "anime_id": 771})
-snapshot = receive()
-print("snapshot:", json.dumps(snapshot, ensure_ascii=False, indent=2))
-
-if snapshot.get("refreshing"):
-    sock.settimeout(40)
-    try:
-        update = receive()
-        if update.get("id") == 2 and update.get("event") == "anime.updated":
-            print("update:", json.dumps(update, ensure_ascii=False, indent=2))
-    except socket.timeout:
-        print("API update did not arrive before the client timeout")
-
-reader.close()
-sock.close()
-```
-
-Для полноценного клиента обработайте отключение и ошибки JSON, не смешивайте
-ответы разных `id`, а `*.updated` применяйте как новый снимок. Образец клиента
-на C++ находится в `tui/ipc_client.hpp`; навигация TUI — в `tui/tui_app.cpp`.
-
-## Проект и документация
-
-- `src/api/` — HTTP-клиент, модели ответов API и извлекатель Kodik.
-- `src/core/` — логика аниме, Search/Feed, коллекций пользователя и очередь
-  фоновых API-задач.
-- `src/core/cache/` — AnimeCache, общий список истории/избранного и SaveManager;
-  отдельная библиотека CMake `aniparser_cache`.
-- `src/server/ipc/` — платформенные реализации Unix socket и Windows pipe,
-  собранные отдельной CMake object-целью.
-- `src/server/` — фасад приложения и IPC-сервер.
-- `src/app/` — ручная интеграционная программа и автономные проверки моделей.
-- `tui/` — независимый Linux-клиент IPC на Notcurses.
-- `docs/` — подробное описание модулей и правила разработки.
-
-Начните с [карты документации](DOCS.md), [архитектуры](docs/ARCHITECTURE.md) и
-[спецификации IPC](src/server/IPC.md). Для изменений моделей см.
-[API-модели](docs/API_MODELS.md); для изменений клиента — [TUI](tui/README.md).
+Проверки используют fixtures и disposable данные под `out/`, без внешнего API.
+Прогресс ограничен 10 000 записями: новый ID при полном лимите даёт ошибку,
+`removeAnimeSaveData` явно освобождает место. Ошибки сохранения видны клиенту;
+повреждённый исходный файл не заменяется пустым состоянием. Детали гарантий и
+исключение `data.committed:true` после ошибки fsync каталога — в [Core](docs/CORE.md).

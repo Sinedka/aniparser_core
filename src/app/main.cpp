@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <string_view>
+#include <type_traits>
 
 #include "json.hpp"
 #include "server.hpp"

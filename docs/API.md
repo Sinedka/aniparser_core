@@ -14,6 +14,8 @@
 | `video_extractor.hpp` | Общий интерфейс извлекателя ссылок и тип `VideoQuality`. |
 | `video.cpp` | Реестр video extractors и функции `getVideoOptions`, `getVideo`. |
 | `kodik.hpp` / `kodik.cpp` | Проверка Kodik iframe, запрос player API и декодирование ссылок. |
+| `aksor.hpp` / `aksor.cpp` | Проверка Aksor iframe и запрос API с вариантами качества. |
+| `anilibria.cpp` | Поиск релиза по alias из Anime-метаданных и получение эпизодов AniLibria. |
 
 Основные функции пространства имён `yani`:
 
@@ -23,6 +25,7 @@ yani::Result<std::vector<yani::SearchResult>> yani::searchTitles(input);
 yani::Result<yani::FeedResponse> yani::getFeed();
 yani::Result<std::vector<yani::VideoQuality>> yani::getVideoOptions(iframe);
 yani::Result<std::string> yani::getVideo(iframe, "720");
+yani::Result<nlohmann::json> yani::getAnilibriaVideos(771);
 ```
 
 `Result<T>` — это `std::expected<T, ApiError>`. При успехе читайте `*result`;
@@ -45,6 +48,9 @@ yani::Result<std::string> yani::getVideo(iframe, "720");
 - Anime: `GET /anime/{id-or-alias}?need_videos=true|false`.
 - Search: `GET /anime` с фильтрами в query string.
 - Feed: `GET /feed`.
+- AniLibria episodes: `GET /anime/releases/{alias}` на `anilibria.top` с
+  fallback на `api.anilibria.app`. Alias читается из `remote_ids.anilibria_alias`
+  для переданного Anime ID. Connect timeout 10 секунд, полный timeout 20 секунд.
 - HTTP-клиент сначала проверяет сетевую ошибку CPR, затем парсит JSON и
   требует HTTP 2xx. Ответ API обычно содержит нужную модель в `response`.
 
@@ -104,11 +110,28 @@ Core использует все поля при построении ключа
 5. Добавьте проверки разрешённых и похожих/поддельных доменов в имеющуюся
    автономную проверку или тестовую инфраструктуру, если она настроена.
 
-Сейчас в реестре только Kodik. Извлекатель загружает iframe, находит параметры
-player API, получает JS с динамическим API-путём, вызывает API с Origin/Referer,
-декодирует URL и сортирует качества по убыванию. IPC и TUI используют
-`getVideoOptions`; Kodik-парсинг не происходит при простом `getAnime` API
-запросе.
+В реестре два iframe extractor-а: Kodik и Aksor. Kodik загружает iframe,
+находит параметры player API, получает JS с динамическим API-путём, вызывает
+API с Origin/Referer, декодирует URL и сортирует качества по убыванию. Aksor
+извлекает ID из точного хоста `player.aksor.tv` и пути `/video/{id}`, затем
+вызывает `https://player.aksor.tv/api/video/{id}` с заголовками Accept и
+Referer. Поля `q4k`, `q2k`, `q1080`, `q720`, `q480`, `q360` преобразуются в
+варианты качества `4k`, `2k`, `1080`, `720`, `480`, `360`; пустые пропускаются.
+IPC и TUI используют `getVideoOptions`; извлечение не происходит при простом
+`getAnime` API запросе.
+
+AniLibria не является iframe extractor: `getAnilibriaVideos(anime_id)` сначала
+получает Anime-метаданные yani.tv, читает `remote_ids.anilibria_alias`, затем
+загружает AniLibria-релиз по alias. Результат имеет JSON-форму:
+
+```json
+{"episodes":[{"ordinal":1,"name":"Эпизод 1","qualities":[{"quality":"fhd","url":"https://...m3u8"},{"quality":"hd","url":"https://...m3u8"}]}]}
+```
+
+Эпизоды сортируются по числовому `ordinal`. Для каждого эпизода возвращаются
+только непустые ссылки: `fhd` берётся из `hls_1080`, `hd` из `hls_720`, `sd` из
+`hls_480`. Относительные ссылки преобразуются в абсолютные с помощью поля
+`host` релиза. Запрос синхронный и не использует Core-кэш.
 
 Внешний API требует сеть. Для ручной проверки:
 
@@ -119,3 +142,16 @@ out/Debug/src/app/my_app --test-get-anime
 Если запрос не проходит, сравните лог с эквивалентным `curl`, проверьте DNS,
 доступ к API и timeout. Ошибка `Connection timed out` до HTTP-ответа не говорит,
 что JSON-модель повреждена.
+
+### Уточнения после аудита
+
+API-модель должна быть JSON-объектом. Anime/Search записи должны иметь
+положительный ID; primitive/null response не превращается в фиктивную карточку.
+Числовые преобразования проверяют конечность, диапазон и целочисленность перед
+cast. Missing/null defaults остаются прежними; partial merge в Core игнорирует
+числовые sentinel defaults. Async callbacks обрабатывают исключения разбора
+включая parse_response; при ошибке конвертации сохраняется response data.
+
+AniLibria сохраняет status/data каждой неуспешной попытки в `data.attempts`;
+итоговый status относится к последней попытке. Если последний хост не ответил,
+status равен 0, даже если предыдущий вернул HTTP-ошибку.

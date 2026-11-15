@@ -33,16 +33,7 @@ bool TaskPool::submit(std::function<void()> task) {
     std::unique_lock lock(mutex_);
     std::cerr << "[api queue] submit pool=" << this << " stopping=" << stopping_
               << " queued=" << queue_.size() << '\n';
-    if (!stopping_ && queue_.size() >= queue_limit_)
-      std::cerr << "[api queue] saturated (" << queue_.size() << '/'
-                << queue_limit_ << "); waiting for a free slot\n";
-    space_available_.wait(
-        lock, [this] { return stopping_ || queue_.size() < queue_limit_; });
-    if (stopping_) {
-      std::cerr << "[api queue] rejected task: pool is stopping, queued="
-                << queue_.size() << '\n';
-      return false;
-    }
+    if (stopping_ || queue_.size() >= queue_limit_) return false;
     queue_.push_back(std::move(task));
     std::cerr << "[api queue] accepted task pool=" << this
               << " queued=" << queue_.size() << '\n';
@@ -51,15 +42,17 @@ bool TaskPool::submit(std::function<void()> task) {
   return true;
 }
 
-void TaskPool::shutdown() {
+void TaskPool::shutdown(bool discard_pending) {
+  std::deque<std::function<void()>> discarded;
   {
     std::lock_guard lock(mutex_);
     if (stopping_) return;
     stopping_ = true;
+    if (discard_pending) discarded.swap(queue_);
   }
+  discarded.clear(); // Destroy task captures outside the queue mutex.
   std::cerr << "[api queue] shutdown requested pool=" << this << '\n';
   condition_.notify_all();
-  space_available_.notify_all();
   for (auto &worker : workers_)
     if (worker.joinable()) worker.join();
   workers_.clear();
@@ -75,7 +68,6 @@ void TaskPool::worker_loop() {
       task = std::move(queue_.front());
       queue_.pop_front();
     }
-    space_available_.notify_one();
     try {
       task();
     } catch (...) {
