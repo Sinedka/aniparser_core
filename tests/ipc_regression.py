@@ -96,7 +96,7 @@ def main():
     root = Path(tempfile.mkdtemp(prefix="ipc-checks-", dir="out")).resolve()
     endpoint = root / "fixture.sock"
     with (root / "server.log").open("w") as log:
-        process, client = launch(build / "src/app/aniparser_checks", endpoint,
+        process, client = launch(build / "tests/aniparser_checks", endpoint,
                                  root / "data", log, True)
         try:
             assert client.request("hello")["protocol"] == 3
@@ -195,7 +195,7 @@ def main():
             if process.poll() is None:
                 stop(process)
 
-        process, client = launch(build / "src/app/aniparser_checks", root / "feed-error.sock",
+        process, client = launch(build / "tests/aniparser_checks", root / "feed-error.sock",
                                  root / "feed-data", log, True, {"ANIPARSER_FIXTURE_FEED_ERROR": "1"})
         try:
             reply = client.request("subscribeFeed")
@@ -208,7 +208,7 @@ def main():
             stop(process)
 
         moved_endpoint = root / "moved.sock"
-        process, client = launch(build / "src/app/aniparser_checks", moved_endpoint,
+        process, client = launch(build / "tests/aniparser_checks", moved_endpoint,
                                  root / "moved-data", log, True)
         try:
             moved_endpoint.rename(root / "retired.sock")
@@ -232,7 +232,7 @@ def main():
         finally:
             client.close()
             stop(process)
-    probe = build / "src/app/tui_client_checks"
+    probe = build / "tests/tui_client_checks"
     if probe.exists():
         subprocess.run([str(probe)], check=True, timeout=10)
     print(f"All IPC checks passed; artifacts: {root}")

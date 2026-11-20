@@ -78,7 +78,7 @@ AnimeCache. Если карточка отсутствует или устаре
 Windows — `%APPDATA%/AniParser` с резервом `%LOCALAPPDATA%/AniParser`.
 Каталог предназначен для одного процесса сервера.
 
-См. [описание Core](CORE.md) и [формат коллекций IPC](../src/server/IPC.md).
+См. [описание Core](CORE.md) и [формат коллекций IPC](../INTEGRATION.md).
 
 Запись использует эксклюзивный временный файл, на Unix — fsync файла,
 rename и fsync каталога; на Windows — FlushFileBuffers и MoveFileExW.

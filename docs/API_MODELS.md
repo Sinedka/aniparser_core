@@ -4,7 +4,7 @@
 `src/api/models.def`. Он описывает форму внешнего API и C++-модели в `src/api/`.
 Это **не** полная схема каждого IPC-ответа: перед отправкой Anime сервер
 заменяет `videos` на сгруппированные `players` (см. ниже и
-[IPC-спецификацию](../src/server/IPC.md#anime-и-video-json)).
+[IPC-спецификацию](../INTEGRATION.md#anime-и-video-json)).
 `AnimeStatus`, описанный ниже, — статус публикации из API yani.tv. Он не связан
 с пользовательскими списками `planned`, `watched`, `completed` и `dropped`.
 
@@ -667,7 +667,7 @@
 `players[].dubbers[].episodes[]`, сортирует эпизоды и удаляет `videos` из
 клиентского JSON. Поля episode остаются `video_id`, `iframe_url`, `number`,
 `date`, `index`, `skips`. Это преобразование описано в
-[SERVER.md](SERVER.md#anime-json) и [IPC.md](../src/server/IPC.md).
+[SERVER.md](SERVER.md#anime-json) и [руководстве по подключению](../INTEGRATION.md).
 
 При изменении `models.def` обновляйте этот справочник. При изменении группировки
 IPC обновляйте protocol-документы и клиентские модели; править API `AnimeResult`

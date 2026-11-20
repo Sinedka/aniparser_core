@@ -15,6 +15,13 @@ out/Debug/tui/aniparser_tui /tmp/aniparser.sock
 Без аргумента клиент использует `/tmp/aniparser.sock`. Он сначала вызывает
 `hello` и завершает работу, если сервер не отвечает протоколом версии 3.
 
+Если сервер уже запущен как [общая пользовательская служба](../INTEGRATION.md#постоянный-запуск-на-linux-с-systemd),
+откройте TUI с её endpoint:
+
+```sh
+out/Debug/tui/aniparser_tui "$XDG_RUNTIME_DIR/aniparser/ipc.sock"
+```
+
 Чтобы собрать его, нужен Linux, notcurses-core и nlohmann-json; в проекте они
 объявлены через CMake/Nix. Буфер обмена использует любую доступную программу
 из списка `wl-copy`, `xclip`, `xsel`; если их нет, URL всё равно виден в меню,
@@ -69,7 +76,7 @@ TUI пока не показывает экраны избранного и по
 `subscribePlanned`/`subscribeWatched`/`subscribeCompleted`/`subscribeDropped`;
 изменить их можно через соответствующие `add...` и `remove...` методы.
 
-При изменении IPC-формы сначала обновите [протокол](../src/server/IPC.md),
+При изменении IPC-формы сначала обновите [протокол](../INTEGRATION.md),
 затем этот клиент и README корня. TUI не должен включать заголовки Core или
 серверные cache-модули.
 

@@ -27,6 +27,7 @@
               cmake
               ninja
               gcc
+              gtest
 
               boost
               nlohmann_json

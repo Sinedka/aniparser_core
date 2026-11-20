@@ -1,3 +1,5 @@
+#include <gtest/gtest.h>
+
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -9,9 +11,9 @@
 #include <stdexcept>
 #include <thread>
 
-#include "../../tui/state_utils.hpp"
-#include "../server/ipc/protocol.hpp"
-#include "../server/ipc/request_validation.hpp"
+#include "../src/server/ipc/protocol.hpp"
+#include "../src/server/ipc/request_validation.hpp"
+#include "../tui/state_utils.hpp"
 #include "callback_queue.hpp"
 #include "core.hpp"
 #include "ipc_server.hpp"
@@ -21,11 +23,7 @@
 using namespace std::chrono_literals;
 namespace {
 using Json = nlohmann::json;
-int failures = 0;
-void check(const char* name, bool success) {
-  std::cout << (success ? "PASS " : "FAIL ") << name << '\n';
-  if (!success) ++failures;
-}
+void check(const char* name, bool success) { EXPECT_TRUE(success) << name; }
 void data_dir(const std::filesystem::path &path) {
 #if defined(_WIN32)
   _putenv_s("ANIPARSER_DATA_DIR", path.string().c_str());
@@ -519,6 +517,69 @@ void input_checks() {
             aniparser::tui::bounded_selection(5, 2) == 1);
 }
 
+std::filesystem::path test_directory() {
+  const auto root =
+      std::filesystem::path("out/checks") /
+      std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count());
+  std::filesystem::create_directories(root);
+  return root;
+}
+
+TEST(CoreRegression, Cache) { cache_checks(); }
+TEST(CoreRegression, Storage) { storage_checks(test_directory()); }
+TEST(CoreRegression, Concurrency) { concurrency_checks(test_directory()); }
+TEST(CoreRegression, InputValidation) { input_checks(); }
+
+TEST(IpcValidation, SearchAcceptsBoundaryValues) {
+  const Json request{{"id", std::string(128, 'x')},
+                     {"method", "subscribeSearch"},
+                     {"params",
+                      {{"limit", 50},
+                       {"offset", 0},
+                       {"min_rating", 0},
+                       {"max_rating", 10},
+                       {"ids", {1, INT64_MAX}},
+                       {"q", std::string(4096, 'x')},
+                       {"sort_forward", true}}}};
+  EXPECT_NO_THROW(aniparser::ipc::validate_request(request));
+}
+
+TEST(IpcValidation, SearchRejectsInvalidFilters) {
+  for (const auto &params :
+       {Json{{"limit", 51}}, Json{{"offset", -1}},
+        Json{{"min_rating", 8}, {"max_rating", 7}}, Json{{"max_rating", 11}},
+        Json{{"ids", {0, 1}}}, Json{{"genres", {42}}},
+        Json{{"q", std::string(4097, 'x')}}, Json{{"sort_forward", "true"}},
+        Json{{"unknown", true}}}) {
+    SCOPED_TRACE(params.dump());
+    const Json request{
+        {"id", 1}, {"method", "subscribeSearch"}, {"params", params}};
+    EXPECT_THROW(aniparser::ipc::validate_request(request), std::runtime_error);
+  }
+}
+
+TEST(IpcFraming, PreservesIncompleteUtf8FrameBetweenReads) {
+  const std::string first = "{\"q\":\"я\"}";
+  std::string pending = first.substr(0, 7);
+  std::vector<std::string> received;
+  const auto record = [&](const std::string &line) {
+    received.push_back(line);
+  };
+  ASSERT_TRUE(aniparser::ipc::consume_lines(pending, record));
+  EXPECT_TRUE(received.empty());
+
+  pending += first.substr(7) + "\n\n{}\n{";
+  ASSERT_TRUE(aniparser::ipc::consume_lines(pending, record));
+  EXPECT_EQ(received, (std::vector<std::string>{first, "{}"}));
+  EXPECT_EQ(pending, "{");
+
+  pending += "}\n";
+  ASSERT_TRUE(aniparser::ipc::consume_lines(pending, record));
+  EXPECT_EQ(received, (std::vector<std::string>{first, "{}", "{}"}));
+  EXPECT_TRUE(pending.empty());
+}
+
 volatile std::sig_atomic_t stopped = 0;
 void stop_fixture(int) { stopped = 1; }
 } // namespace
@@ -549,18 +610,8 @@ int main(int argc, char** argv) {
       while (!stopped) std::this_thread::sleep_for(20ms);
       return 0;
     }
-    const auto root =
-        std::filesystem::path("out/checks") /
-        std::to_string(
-            std::chrono::steady_clock::now().time_since_epoch().count());
-    std::filesystem::create_directories(root);
-    cache_checks();
-    storage_checks(root);
-    concurrency_checks(root);
-    input_checks();
-    std::cout << failures << " regression failure(s); fixtures: " << root
-              << '\n';
-    return failures == 0 ? 0 : 1;
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
   } catch (const std::exception &error) {
     std::cerr << "Regression check aborted: " << error.what() << '\n';
     return 2;

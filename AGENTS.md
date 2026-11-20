@@ -9,7 +9,7 @@
   `src/core/cache/`: shared AnimeCache, ID collections, SaveManager.
 - `src/server/`: Core facade and IPC serialization; `ipc/` implements Unix
   sockets and Windows named pipes.
-- `src/app/`: manual API executable and offline checks.
+- `src/app/`: manual API executable. `tests/` contains offline checks.
 - `tui/`: standalone Linux IPC client using Notcurses; never include backend
   headers, link backend libraries, or read server storage here.
 - Use `DOCS.md` to find Russian documentation. Read `src/server/IPC.md` before
@@ -18,7 +18,8 @@
 ## Build and verification
 
 CMake requires version 3.25+ and C++23. Required libraries are CPR and
-nlohmann-json; Linux TUI also requires pkg-config and notcurses-core. `flake.nix`
+nlohmann-json; Linux TUI also requires pkg-config and notcurses-core. Tests
+require GoogleTest. `flake.nix`
 declares the Linux development environment.
 
 Run from the repository root:
@@ -27,7 +28,7 @@ Run from the repository root:
 nix develop
 cmake -S . -B out/Debug -DCMAKE_BUILD_TYPE=Debug
 cmake --build out/Debug -j2
-out/Debug/src/app/my_app --self-test
+ctest --test-dir out/Debug --output-on-failure
 git diff --check
 ```
 
@@ -36,10 +37,10 @@ git diff --check
   `api`, `aniparser_cache`, `core`, `server`, `my_app`, and `aniparser_tui`.
 - `my_app` is enabled on Unix except Android/iOS; `aniparser_server` is enabled
   except Android/iOS; `aniparser_tui` is Linux-only.
-- No CTest or unit-test framework is configured. `--self-test` checks URL
-  recognition and Anime IPC serialization without network access.
-- `out/Debug/src/app/my_app --test-get-anime` calls the live API for ID 771.
-  Normal `my_app [id]` execution also uses the network. Report network checks
+- GoogleTest checks are registered with CTest. Use `-L offline` for checks
+  that do not open sockets, and `-DBUILD_TESTING=OFF` for a build without tests.
+  GoogleTest is available in the Nix development environment.
+- `my_app [id]` calls the live API. Report network checks
   separately from offline checks; a successful build does not verify providers.
 - Build affected targets after code changes. For visible TUI changes, manually
   check the affected screen, keys, scrolling, and resize behavior with a server;
@@ -132,7 +133,7 @@ git diff --check
   `src/api/test.cpp` is legacy duplicated model code, not a runnable test suite;
   empty `cmake/*` helper files do not enable sanitizers or warnings.
 
-- Run `out/Debug/src/app/aniparser_checks` and, on Linux with local sockets,
+- Run `out/Debug/tests/aniparser_checks` and, on Linux with local sockets,
   `python3 tests/ipc_regression.py` for changes covered by the audit fixes.
   Use `Core::ApiBackend` fixtures for deterministic offline API failures.
   `CallbackQueue` must deliver the initial snapshot before queued completions;

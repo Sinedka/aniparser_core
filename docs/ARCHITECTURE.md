@@ -36,7 +36,8 @@
 | `src/core/cache/` | AnimeCache, общий `AnimeCollection`, модели состояния и SaveManager; CMake-цель `aniparser_cache`. |
 | `src/server/` | Фасад `Server`, JSON IPC и запуск сервера. |
 | `src/server/ipc/` | Unix socket и Windows named pipe; CMake выбирает реализацию платформы. |
-| `src/app/` | Ручной исполняемый пример и offline-проверки. |
+| `src/app/` | Ручной исполняемый пример API. |
+| `tests/` | Автономные регрессионные проверки. |
 | `tui/` | Linux TUI-клиент. Подключается к серверу только через IPC. |
 | `docs/` | Этот справочник. |
 | `out/` | CMake build tree; его не следует коммитить. |
@@ -62,10 +63,9 @@
 если карточек аниме нет в Anime-кэше, Core отдельно загружает метаданные только
 для ID текущей страницы через Search.
 
-При ошибке API старый снимок остаётся в кэше. Для Anime клиент получает
-`anime.updated` с `ok:false` и `error`. Для Feed/Search текущая реализация не
-отправляет событие при неудачном API обновлении; подробность ошибки остаётся в
-логе сервера.
+При ошибке обновления Anime, Feed или Search Core оставляет предыдущий снимок
+в кэше. Клиент получает терминальное событие `*.updated` с `ok:false`,
+`error` и `status`.
 
 ## Главная граница: JSON
 
@@ -98,7 +98,7 @@ Core централизует конкурентный доступ, TTL и об
 feed. Server не хранит копию кэша и не передаёт клиенту ссылку на него. TUI
 получает snapshot, а при обновлении заменяет или объединяет его локально.
 
-Подробнее см. [Core](CORE.md), [кэш](CACHE.md) и [IPC](../src/server/IPC.md).
+Подробнее см. [Core](CORE.md), [кэш](CACHE.md) и [IPC](../INTEGRATION.md).
 
 После исправлений аудита JSON dispatcher общий для обоих транспортов:
 `src/server/ipc/protocol.hpp`; validation — `request_validation.hpp`. Платформенные

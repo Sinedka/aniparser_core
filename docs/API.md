@@ -136,7 +136,7 @@ AniLibria не является iframe extractor: `getAnilibriaVideos(anime_id)`
 Внешний API требует сеть. Для ручной проверки:
 
 ```sh
-out/Debug/src/app/my_app --test-get-anime
+out/Debug/src/app/my_app 771
 ```
 
 Если запрос не проходит, сравните лог с эквивалентным `curl`, проверьте DNS,

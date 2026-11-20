@@ -16,3 +16,8 @@ add_subdirectory(src)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_subdirectory(tui)
 endif()
+
+include(CTest)
+if(BUILD_TESTING AND UNIX AND NOT ANDROID AND NOT IOS)
+    add_subdirectory(tests)
+endif()

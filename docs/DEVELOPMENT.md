@@ -32,11 +32,8 @@ cmake --build out/Debug --target my_app -j2
 # Запросить Anime 771 (или указанный ID) и напечатать полную API-модель.
 out/Debug/src/app/my_app 771
 
-# Сетевой ручной тест, проверяет getAnime(771, true).
-out/Debug/src/app/my_app --test-get-anime
-
 # Автономные проверки Kodik URL и Anime-to-players сериализации.
-out/Debug/src/app/my_app --self-test
+out/Debug/tests/video_serialization_checks
 
 # Запустить сервер (endpoint — первый аргумент).
 out/Debug/src/server/aniparser_server /tmp/aniparser.sock
@@ -45,10 +42,9 @@ out/Debug/src/server/aniparser_server /tmp/aniparser.sock
 out/Debug/tui/aniparser_tui /tmp/aniparser.sock
 ```
 
-`my_app --self-test` не требует сети. `--test-get-anime` и обычный запуск
-обращаются к живому внешнему API; это integration check, а не hermetic unit
-test. В проекте нет настроенного CTest/GoogleTest suite. Успешный build не
-проверяет доступность DNS/API или Kodik CDN.
+`video_serialization_checks` работает автономно. `my_app [id]` обращается
+к внешнему API. Проверяйте доступность DNS, API и CDN отдельно от сборки.
+C++-проверки используют GoogleTest. Их автоматически регистрирует CTest.
 
 ## Где менять код
 
@@ -57,7 +53,7 @@ test. В проекте нет настроенного CTest/GoogleTest suite. 
 | Новое API поле/модель | `src/api/models.def`, `src/api/json.hpp` | API справочник, `my_app`, IPC потребители при необходимости |
 | Новый API endpoint | `src/api/api.hpp`, `src/api/api.cpp` или отдельный provider source | `ApiError`, caller, protocol/client docs и сборка |
 | Кэш/TTL/coalescing | `src/core/core.hpp`, `src/core/cache/`, `src/core/{anime_service,search_feed}.cpp` | callbacks, mutex, API failure, CORE/CACHE docs |
-| Новый IPC method/поле | `src/server/server.*`, `src/server/ipc/unix.cpp`, `src/server/ipc/windows.cpp` | protocol docs, оба transport-а, клиенты |
+| Новый IPC method/поле | `src/server/server.*`, `src/server/ipc/protocol.hpp`, `src/server/ipc/request_validation.hpp` | protocol docs, оба transport-а, клиенты |
 | Новый player extractor | `video_extractor.hpp`, отдельный extractor, `video.cpp` registry | spoofed host cases, API и TUI video flow |
 | Экран/клавиши TUI | `tui/tui_app.cpp` | IPC response/event, resize/scroll, `tui/README.md` |
 | Clipboard | `tui/clipboard.*` | Wayland/X11 наличие утилиты и ошибка запуска |
@@ -65,13 +61,12 @@ test. В проекте нет настроенного CTest/GoogleTest suite. 
 ## Порядок добавления IPC-функции
 
 1. Добавьте операцию на уровне API/Core/Server согласно ответственности.
-2. Обработайте метод и проверьте обязательные JSON поля в
-   `ipc/unix.cpp` **и** `ipc/windows.cpp`.
+2. Добавьте общий обработчик и проверку полей в `ipc/protocol.hpp` и
+   `ipc/request_validation.hpp`. Проверьте оба транспорта.
 3. Определите точный response shape, ID и поведение при API ошибке.
-4. Обновите `src/server/IPC.md`, `docs/SERVER.md` и README, если это пример,
-   который должен знать каждый клиент.
+4. Обновите `INTEGRATION.md` и описание реализации в `docs/SERVER.md`.
 5. Обновите TUI или другой клиент.
-6. Соберите затронутые цели. Используйте `my_app --self-test` для автономной
+6. Соберите затронутые цели. Используйте `video_serialization_checks` для автономной
    логики; сетевые проверки запускайте отдельно.
 
 Unix и Windows transports должны сохранять один wire format. TUI не должен
@@ -105,21 +100,35 @@ Unix и Windows transports должны сохранять один wire format.
   и возвращает эпизоды с доступными HLS-ссылками. TUI показывает AniLibria как
   дополнительный источник рядом с iframe-плеерами.
 - Wire protocol имеет версию 3. Если существующие сообщения станут
-  несовместимы для клиента, синхронно измените `protocol` в `hello` на обоих
-  transport-ах и обновите клиентскую проверку версии и документацию.
+  несовместимы для клиента, измените `protocol` в общем обработчике
+  `hello`, проверку версии у клиентов и документацию.
 
-## Регрессионные проверки после аудита
+## Автономные тесты
+
+Для сборки тестов нужен GoogleTest (пакет `gtest` в `nix develop`).
+После обычной сборки из корня репозитория:
 
 ```sh
-out/Debug/src/app/aniparser_checks
+ctest --test-dir out/Debug --output-on-failure
+ctest --test-dir out/Debug -L offline --output-on-failure
+```
+
+Метка `offline` включает Core, валидацию IPC и сериализацию видео.
+Метка `ipc` включает проверки сервера и TUI-клиента на Linux с локальными
+Unix-сокетами. Среди них доставка событий двум клиентам, отключение одного
+клиента и чтение сохранённого избранного после перезапуска сервера.
+CTest запускает каждый сценарий GoogleTest отдельно. Для сборки без тестовых
+целей передайте `-DBUILD_TESTING=OFF` при конфигурации CMake.
+
+## Дополнительные интеграционные сценарии
+
+```sh
 python3 tests/ipc_regression.py
 ```
 
-Первый executable проверяет кэш, транзакции, версии сохранений, лимит прогресса,
-callbacks, очередь и UTF-8 без сети. Второй тест запускает fixture server и
-обычный сервер с disposable data paths; ему нужны локальные Unix sockets.
-На Linux дополнительно запускается `tui_client_checks` (deadline, cancellation,
-framing, EOF), без Notcurses/backend linkage. Все artifacts сохраняются в out/.
+`ipc_regression.py` запускает fixture server и обычный сервер с отдельными
+данными. Ему нужны локальные Unix-сокеты. Скрипт также запускает
+`tui_client_checks`, если цель собрана. Артефакты хранятся в `out/`.
 Для ручного UI без внешнего API: `aniparser_checks --fixture-server ENDPOINT`.
 Этот режим тестового executable не является production provider.
 
